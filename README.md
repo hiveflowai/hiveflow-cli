@@ -1,5 +1,9 @@
 # 🐝 Hiveflow CLI
 
+[![npm version](https://img.shields.io/npm/v/@hiveflow/cli.svg)](https://www.npmjs.com/package/@hiveflow/cli)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub issues](https://img.shields.io/github/issues/hiveflowai/hiveflow-cli.svg)](https://github.com/hiveflowai/hiveflow-cli/issues)
+
 A single entry point for **your entire AI coding stack**. Four layers, one binary:
 
 1. **CLI router** — orchestrates Claude Code, Gemini, Codex and Aider: infers the task type and launches the best installed CLI.
@@ -18,6 +22,12 @@ hiveflow (auto·auto) ❯ /agent refactor src/auth.js and run the tests
 hiveflow (auto·auto) ❯ /swarm status
 hiveflow (auto·auto) ❯ /help
 ```
+
+## Why Open Source?
+
+**Transparency = Trust.** When you run `curl | bash` to install a development tool that touches your codebase, you deserve to audit every line. This CLI is MIT-licensed and fully auditable — inspect the code, report issues, contribute improvements.
+
+The CLI is your on-ramp to the [Hiveflow platform](https://hiveflow.ai): visual workflow orchestration, remote control across devices, team collaboration, and workers that turn kanban boards into autonomous agents. Open-sourcing the CLI brings developers into the ecosystem while keeping our competitive advantage where it belongs: the platform itself.
 
 ## Documentation
 
