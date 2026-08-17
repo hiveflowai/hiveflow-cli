@@ -1,0 +1,494 @@
+#!/usr/bin/env bash
+# ============================================================
+# CLI Orchestrator Module for asis-coder
+# Manages discovery, health-check, selection, and invocation
+# of multiple AI coding CLI tools (claude, gemini, codex, aider)
+# ============================================================
+
+CLI_TOOLS_CONFIG="${CONFIG_DIR:-$HOME/.config/coder-cli}/cli_tools.json"
+
+type hf_t >/dev/null 2>&1 || hf_t() { if [ "${HF_LANG:-en}" = "es" ] && [ -n "${2:-}" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+
+# ─── Tool Definitions ─────────────────────────────────────────
+
+declare -A CLI_BINARIES=(
+  [claude]="claude"
+  [gemini]="gemini"
+  [codex]="codex"
+  [aider]="aider"
+)
+
+declare -A CLI_VERSION_FLAGS=(
+  [claude]="--version"
+  [gemini]="--version"
+  [codex]="--version"
+  [aider]="--version"
+)
+
+# El prompt va SIEMPRE entre comillas simples: cli_build_cmd escapa para ese
+# contexto ('  ->  '\''). Con comillas dobles un prompt con " o $ rompía el
+# comando o inyectaba shell.
+declare -A CLI_LAUNCH_TEMPLATES=(
+  [claude]='claude -p '"'"'{PROMPT}'"'"' --allowedTools "Bash(git*),Bash(npm*),Bash(node*),Read,Write,Edit" {OPTIONS}'
+  [gemini]='gemini {OPTIONS} -p '"'"'{PROMPT}'"'"''
+  [codex]='codex exec {OPTIONS} '"'"'{PROMPT}'"'"''
+  [aider]='aider --yes-always --message '"'"'{PROMPT}'"'"' {OPTIONS} {FILES}'
+)
+
+# Flag de autonomía por tool. Antes se pasaba --dangerously-skip-permissions
+# (flag exclusivo de claude) a cualquier tool.
+# codex: 'exec' ya es headless; -s workspace-write le deja escribir en el
+# worktree sin desactivar el sandbox. Sube a danger-full-access solo si hace falta.
+declare -A CLI_AUTO_FLAGS=(
+  [claude]="--dangerously-skip-permissions"
+  [gemini]="-y"
+  [codex]="-s workspace-write --skip-git-repo-check"
+  [aider]=""
+)
+
+declare -A CLI_CAPABILITIES=(
+  [claude]="refactor,multi-file,complex-logic,testing,security,architecture"
+  [gemini]="research,large-context,documentation,analysis,exploration"
+  [codex]="refactor,quick-fix,sandboxed,testing"
+  [aider]="refactor,quick-fix,multi-model,git-aware"
+)
+
+declare -A CLI_CONTEXT_WINDOW=(
+  [claude]="200000"
+  [gemini]="1000000"
+  [codex]="200000"
+  [aider]="varies"
+)
+
+declare -A CLI_COST_TIER=(
+  [claude]="high"
+  [gemini]="free"
+  [codex]="medium"
+  [aider]="varies"
+)
+
+# Task type -> preferred tool -> fallback
+declare -A CLI_ROUTING=(
+  [complex-refactor]="claude:aider:codex"
+  [large-analysis]="gemini:claude"
+  [quick-fix]="aider:codex:claude"
+  [documentation]="gemini:claude"
+  [security-audit]="claude:gemini"
+  [test-generation]="claude:aider"
+  [research]="gemini:claude"
+  [new-feature]="claude:aider"
+  [default]="claude:gemini:codex:aider"
+)
+
+# ─── Discovery ────────────────────────────────────────────────
+
+cli_discover() {
+  local tools=("claude" "gemini" "codex" "aider")
+  local available=0
+  local total=${#tools[@]}
+
+  echo ""
+  printf "  %-12s %-12s %-20s %s\n" "TOOL" "STATUS" "VERSION" "CAPABILITIES"
+  printf "  %-12s %-12s %-20s %s\n" "────" "──────" "───────" "────────────"
+
+  for tool in "${tools[@]}"; do
+    local binary="${CLI_BINARIES[$tool]}"
+    local bin_path
+    bin_path=$(which "$binary" 2>/dev/null)
+
+    if [ -n "$bin_path" ]; then
+      local version
+      version=$("$binary" ${CLI_VERSION_FLAGS[$tool]} 2>/dev/null | head -1 | tr -d '\n')
+      printf "  %-12s \033[32m%-12s\033[0m %-20s %s\n" "$tool" "installed" "$version" "${CLI_CAPABILITIES[$tool]}"
+      ((available++))
+    else
+      printf "  %-12s \033[31m%-12s\033[0m %-20s %s\n" "$tool" "not found" "-" "${CLI_CAPABILITIES[$tool]}"
+    fi
+  done
+
+  echo ""
+  echo "  $(hf_t "$available/$total tools available" "$available/$total tools disponibles")"
+  echo ""
+}
+
+# ─── Health Check ─────────────────────────────────────────────
+
+cli_health_check() {
+  local tool="${1:-all}"
+
+  if [ "$tool" = "all" ]; then
+    local tools=("claude" "gemini" "codex" "aider")
+  else
+    local tools=("$tool")
+  fi
+
+  for t in "${tools[@]}"; do
+    local binary="${CLI_BINARIES[$t]}"
+    local bin_path
+    bin_path=$(which "$binary" 2>/dev/null)
+
+    if [ -z "$bin_path" ]; then
+      echo "  [$t] ❌ $(hf_t "Not installed" "No instalado")"
+      continue
+    fi
+
+    local version
+    version=$("$binary" ${CLI_VERSION_FLAGS[$t]} 2>/dev/null | head -1)
+    if [ $? -eq 0 ] && [ -n "$version" ]; then
+      echo "  [$t] ✅ OK ($version)"
+    else
+      echo "  [$t] ⚠️  $(hf_t "Installed but not responding" "Instalado pero no responde")"
+    fi
+  done
+}
+
+# ─── Tool Selection ───────────────────────────────────────────
+
+cli_select() {
+  local task_type="${1:-default}"
+  local routing="${CLI_ROUTING[$task_type]:-${CLI_ROUTING[default]}}"
+
+  IFS=':' read -ra candidates <<< "$routing"
+
+  for candidate in "${candidates[@]}"; do
+    local binary="${CLI_BINARIES[$candidate]}"
+    if which "$binary" &>/dev/null; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  # Last resort: return whatever is available
+  for tool in claude gemini codex aider; do
+    if which "${CLI_BINARIES[$tool]}" &>/dev/null; then
+      echo "$tool"
+      return 0
+    fi
+  done
+
+  echo ""
+  return 1
+}
+
+# Infiere el task-type de CLI_ROUTING a partir del texto de la tarea.
+# Heurística por keywords (es/en); si nada matchea → default.
+cli_infer_task_type() {
+  local task_lc
+  task_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+
+  case "$task_lc" in
+    *securit*|*segurid*|*audit*|*vulnerab*)        echo "security-audit" ;;
+    *test*|*prueba*|*spec*)                        echo "test-generation" ;;
+    *document*|*readme*|*docs*)                    echo "documentation" ;;
+    *refactor*|*reestructur*|*migra*)              echo "complex-refactor" ;;
+    *investig*|*research*|*explora*)               echo "research" ;;
+    *analiz*|*analy*|*revisa*|*review*)            echo "large-analysis" ;;
+    *arregla*|*fix*|*bug*|*corrige*|*hotfix*)      echo "quick-fix" ;;
+    *implementa*|*feature*|*crea*|*nueva*|*new*)   echo "new-feature" ;;
+    *)                                             echo "default" ;;
+  esac
+}
+
+# ─── Interactive Picker ───────────────────────────────────────
+
+# Menú interactivo: lista tools instalados y deja elegir (o 'auto').
+# Escribe .tool en el project JSON; 'auto' lo elimina para que el
+# lanzamiento use cli_select según la tarea.
+cli_choose() {
+  local project="$1" agent="$2"
+  local project_file="${SWARM_DIR:-$HOME/.config/coder-cli/swarm}/projects/${project}.json"
+
+  if [ -z "$project" ] || [ -z "$agent" ]; then
+    echo "  $(hf_t "Usage: /agents choose <project> <agent>" "Uso: /agents choose <project> <agent>")"
+    return 1
+  fi
+  if [ ! -f "$project_file" ]; then
+    echo "  ❌ $(hf_t "Project not found: $project" "Proyecto no encontrado: $project")"
+    return 1
+  fi
+  if ! jq -e --arg a "$agent" '.agents[] | select(.name==$a)' "$project_file" >/dev/null 2>&1; then
+    echo "  ❌ $(hf_t "Agent '$agent' does not exist in '$project'" "Agente '$agent' no existe en '$project'")"
+    return 1
+  fi
+
+  local current
+  current="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .tool // "auto"' "$project_file")"
+
+  echo ""
+  echo "  🔧 $(hf_t "Tool for agent '$agent' (current: $current)" "Tool para el agente '$agent' (actual: $current)")"
+  echo "  ──────────────────────────────────────────────"
+  echo ""
+  printf "  %s) %-8s %s\n" "0" "auto" "$(hf_t "choose by task type (automatic routing)" "elegir según el tipo de tarea (routing automático)")"
+
+  # Solo tools instalados son elegibles
+  local installed=() i=1
+  for t in claude gemini codex aider; do
+    if command -v "${CLI_BINARIES[$t]}" >/dev/null 2>&1; then
+      installed+=("$t")
+      printf "  %s) %-8s %s\n" "$i" "$t" "${CLI_CAPABILITIES[$t]}"
+      ((i++))
+    else
+      printf "     %-8s $(hf_t "(not installed — /agents install %s)" "(no instalado — /agents install %s)")\n" "$t" "$t"
+    fi
+  done
+  echo ""
+
+  local choice
+  read -r -p "  $(hf_t "Selection" "Selección") [0-$((i-1))]: " choice
+
+  local tmp
+  tmp="$(mktemp)"
+  if [ "$choice" = "0" ]; then
+    jq --arg a "$agent" '(.agents[] | select(.name==$a)) |= del(.tool)' \
+      "$project_file" > "$tmp" && mv "$tmp" "$project_file"
+    echo "  ✅ $(hf_t "$agent → auto (routing by task type)" "$agent → auto (routing por tipo de tarea)")"
+  elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -lt "$i" ]; then
+    local tool="${installed[$((choice-1))]}"
+    jq --arg a "$agent" --arg t "$tool" \
+      '(.agents[] | select(.name==$a)).tool = $t' \
+      "$project_file" > "$tmp" && mv "$tmp" "$project_file"
+    echo "  ✅ $agent → $tool"
+  else
+    rm -f "$tmp"
+    echo "  ❌ $(hf_t "Invalid selection" "Selección inválida")"
+    return 1
+  fi
+}
+
+# ─── Build Command ────────────────────────────────────────────
+
+cli_build_cmd() {
+  local tool="$1"
+  local prompt="$2"
+  local options="${3:-}"
+  local files="${4:-}"
+
+  local template="${CLI_LAUNCH_TEMPLATES[$tool]}"
+  if [ -z "$template" ]; then
+    echo "$(hf_t "ERROR: Tool '$tool' has no template defined" "ERROR: Tool '$tool' no tiene template definido")" >&2
+    return 1
+  fi
+
+  # Escape prompt for shell safety
+  local escaped_prompt
+  escaped_prompt=$(printf '%s' "$prompt" | sed "s/'/'\\\\''/g")
+
+  local cmd="$template"
+  cmd="${cmd//\{PROMPT\}/$escaped_prompt}"
+  cmd="${cmd//\{OPTIONS\}/$options}"
+  cmd="${cmd//\{FILES\}/$files}"
+
+  echo "$cmd"
+}
+
+# ─── Install Tool ─────────────────────────────────────────────
+
+cli_install() {
+  local tool="$1"
+
+  case "$tool" in
+    claude)
+      echo "  $(hf_t "Claude Code is installed from: https://docs.anthropic.com/en/docs/claude-code" "Claude Code se instala desde: https://docs.anthropic.com/en/docs/claude-code")"
+      echo "  $(hf_t "Command: curl -fsSL https://claude.ai/install.sh | sh" "Comando: curl -fsSL https://claude.ai/install.sh | sh")"
+      ;;
+    gemini)
+      echo "  $(hf_t "Installing Gemini CLI..." "Instalando Gemini CLI...")"
+      npm install -g @google/gemini-cli
+      ;;
+    codex)
+      echo "  $(hf_t "Installing OpenAI Codex CLI..." "Instalando OpenAI Codex CLI...")"
+      npm install -g @openai/codex
+      ;;
+    aider)
+      echo "  $(hf_t "Installing Aider..." "Instalando Aider...")"
+      if command -v pip3 &>/dev/null; then
+        pip3 install --user aider-chat
+      elif command -v python3 &>/dev/null; then
+        python3 -m pip install --user aider-chat
+      else
+        echo "  ❌ $(hf_t "pip3 or python3 with pip is required. Install with: sudo apt install python3-pip" "Se requiere pip3 o python3 con pip. Instala con: sudo apt install python3-pip")"
+        return 1
+      fi
+      ;;
+    *)
+      echo "  ❌ $(hf_t "Unknown tool: $tool" "Tool desconocido: $tool")"
+      echo "  $(hf_t "Available tools: claude, gemini, codex, aider" "Tools disponibles: claude, gemini, codex, aider")"
+      return 1
+      ;;
+  esac
+}
+
+# ─── Save Registry ────────────────────────────────────────────
+
+cli_save_registry() {
+  local config_dir
+  config_dir=$(dirname "$CLI_TOOLS_CONFIG")
+  mkdir -p "$config_dir"
+
+  local tools_json='{"tools":['
+  local first=true
+
+  for tool in claude gemini codex aider; do
+    local binary="${CLI_BINARIES[$tool]}"
+    local bin_path
+    bin_path=$(which "$binary" 2>/dev/null)
+    local available="false"
+    local version="null"
+
+    if [ -n "$bin_path" ]; then
+      available="true"
+      local ver
+      ver=$("$binary" ${CLI_VERSION_FLAGS[$tool]} 2>/dev/null | head -1 | tr -d '\n')
+      if [ -n "$ver" ]; then
+        version="\"$ver\""
+      fi
+    fi
+
+    if [ "$first" = true ]; then
+      first=false
+    else
+      tools_json+=","
+    fi
+
+    tools_json+=$(cat <<ENTRY
+{
+  "name":"$tool",
+  "binary":"$binary",
+  "available":$available,
+  "version":$version,
+  "capabilities":"${CLI_CAPABILITIES[$tool]}",
+  "context_window":"${CLI_CONTEXT_WINDOW[$tool]}",
+  "cost_tier":"${CLI_COST_TIER[$tool]}"
+}
+ENTRY
+)
+  done
+
+  tools_json+=']}'
+
+  echo "$tools_json" | python3 -m json.tool > "$CLI_TOOLS_CONFIG" 2>/dev/null || echo "$tools_json" > "$CLI_TOOLS_CONFIG"
+  echo "  $(hf_t "Registry saved to: $CLI_TOOLS_CONFIG" "Registry guardado en: $CLI_TOOLS_CONFIG")"
+}
+
+# ─── Swarm Tool Command Handler ───────────────────────────────
+
+swarm_tool_handler() {
+  local subcommand="${1:-list}"
+  shift 2>/dev/null
+
+  case "$subcommand" in
+    list|ls)
+      echo ""
+      echo "  🔧 AI CLI Tools Registry"
+      echo "  ========================"
+      cli_discover
+      ;;
+    install)
+      local tool_name="$1"
+      if [ -z "$tool_name" ]; then
+        echo "  $(hf_t "Usage: /agents install <tool>" "Uso: /agents install <tool>")"
+        echo "  Tools: claude, gemini, codex, aider"
+        return 1
+      fi
+      cli_install "$tool_name"
+      ;;
+    test|check)
+      local tool_name="${1:-all}"
+      echo ""
+      echo "  🧪 Health Check: $tool_name"
+      echo "  ─────────────────────────"
+      cli_health_check "$tool_name"
+      echo ""
+      ;;
+    select)
+      local task_type="${1:-default}"
+      local selected
+      selected=$(cli_select "$task_type")
+      if [ -n "$selected" ]; then
+        echo "  $(hf_t "For '$task_type' → $selected" "Para '$task_type' → $selected")"
+      else
+        echo "  ❌ $(hf_t "No tool available for '$task_type'" "No hay tool disponible para '$task_type'")"
+      fi
+      ;;
+    choose|pick)
+      cli_choose "$1" "$2"
+      ;;
+    set)
+      local project="$1"
+      local agent="$2"
+      local tool="$3"
+      if [ -z "$project" ] || [ -z "$agent" ] || [ -z "$tool" ]; then
+        echo "  $(hf_t "Usage: /agents set <project> <agent> <tool>" "Uso: /agents set <project> <agent> <tool>")"
+        return 1
+      fi
+      # Update agent config with tool field
+      local project_file="${SWARM_DIR:-$HOME/.config/coder-cli/swarm}/projects/${project}.json"
+      if [ ! -f "$project_file" ]; then
+        echo "  ❌ $(hf_t "Project not found: $project" "Proyecto no encontrado: $project")"
+        return 1
+      fi
+      if command -v jq &>/dev/null; then
+        local tmp
+        tmp=$(mktemp)
+        if [ "$tool" = "auto" ]; then
+          # auto = sin tool fijo; el lanzamiento usa cli_select por tarea
+          jq --arg agent "$agent" \
+            '(.agents[] | select(.name == $agent)) |= del(.tool)' \
+            "$project_file" > "$tmp" && mv "$tmp" "$project_file"
+          echo "  ✅ $(hf_t "$agent → auto (routing by task type)" "$agent → auto (routing por tipo de tarea)")"
+        else
+          jq --arg agent "$agent" --arg tool "$tool" \
+            '(.agents[] | select(.name == $agent)).tool = $tool' \
+            "$project_file" > "$tmp" && mv "$tmp" "$project_file"
+          echo "  ✅ $(hf_t "$agent → $tool (project: $project)" "$agent → $tool (proyecto: $project)")"
+        fi
+      else
+        echo "  ⚠️  $(hf_t "jq is required to update the config" "Se requiere jq para actualizar el config")"
+        return 1
+      fi
+      ;;
+    registry|save)
+      echo "  📝 $(hf_t "Updating registry..." "Actualizando registry...")"
+      cli_save_registry
+      ;;
+    *)
+      if [ "${HF_LANG:-en}" = "es" ]; then
+      echo ""
+      echo "  🔧 /agents - Gestión de AI CLI Tools"
+      echo "  ─────────────────────────────────────────────"
+      echo ""
+      echo "  Comandos:"
+      echo "    list                          Ver tools disponibles"
+      echo "    install <tool>                Instalar un tool"
+      echo "    test [tool|all]               Verificar salud de tools"
+      echo "    select <task-type>            Ver qué tool se usaría"
+      echo "    choose <project> <agent>      Menú interactivo para elegir tool"
+      echo "    set <project> <agent> <tool>  Asignar tool a un agente (o 'auto')"
+      echo "    registry                      Guardar registry a disco"
+      echo ""
+      echo "  Task types: complex-refactor, large-analysis, quick-fix,"
+      echo "              documentation, security-audit, test-generation,"
+      echo "              research, new-feature"
+      echo ""
+      else
+      echo ""
+      echo "  🔧 /agents - AI CLI Tools management"
+      echo "  ─────────────────────────────────────────────"
+      echo ""
+      echo "  Commands:"
+      echo "    list                          Show available tools"
+      echo "    install <tool>                Install a tool"
+      echo "    test [tool|all]               Check tool health"
+      echo "    select <task-type>            Show which tool would be used"
+      echo "    choose <project> <agent>      Interactive menu to pick a tool"
+      echo "    set <project> <agent> <tool>  Assign a tool to an agent (or 'auto')"
+      echo "    registry                      Save registry to disk"
+      echo ""
+      echo "  Task types: complex-refactor, large-analysis, quick-fix,"
+      echo "              documentation, security-audit, test-generation,"
+      echo "              research, new-feature"
+      echo ""
+      fi
+      ;;
+  esac
+}

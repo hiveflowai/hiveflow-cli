@@ -1,0 +1,46 @@
+{
+  "name": "@hiveflow/cli",
+  "version": "0.4.0",
+  "description": "🐝 Hiveflow CLI — orchestrates AI coding CLIs (Claude Code, Gemini, Codex, Aider) with task-type router + embedded native agent with own tool-use loop (read/write/edit/bash/web/grep/glob/subagent, permissions, sessions, hooks, skills, MCP)",
+  "bin": {
+    "hiveflow": "./hiveflow.sh",
+    "hive": "./hiveflow.sh",
+    "hf": "./hiveflow.sh",
+    "flow": "./hiveflow.sh"
+  },
+  "files": [
+    "hiveflow.sh",
+    "install.sh",
+    "lib/",
+    "assets/",
+    "README.md",
+    "GUIDE.md"
+  ],
+  "scripts": {
+    "postinstall": "chmod +x hiveflow.sh",
+    "test": "bash tests/run_all.sh"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "orchestrator",
+    "agent",
+    "agentic",
+    "tool-use",
+    "mcp",
+    "claude",
+    "gemini",
+    "codex",
+    "aider",
+    "hiveflow"
+  ],
+  "author": "Hiveflow <jo@hiveflow.ai>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hiveflowai/hiveflow-cli.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

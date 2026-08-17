@@ -1,0 +1,248 @@
+#!/bin/bash
+
+# ==========================================
+# MÓDULO SWARM MANAGER - swarm_manager.sh
+# ==========================================
+# Ejecución distribuida: lanza Claude CLI (o cualquier comando) dentro de tmux
+# en cada device asignado a un agente. Permite start/stop/status/logs/attach.
+
+type hf_t >/dev/null 2>&1 || hf_t() { if [ "${HF_LANG:-en}" = "es" ] && [ -n "${2:-}" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+
+swarm_manager_help() {
+    if [ "${HF_LANG:-en}" = "es" ]; then
+    cat <<EOF
+${SWARM_C_BOLD}/swarm${SWARM_C_RESET}  -  control de ejecución
+
+  start <project> [agent]         Lanzar agentes (todos o uno específico)
+  stop <project> [agent]          Detener agentes
+  status [project]                Ver estado global o de un proyecto
+  logs <project> <agent> [--follow]
+  attach <project> <agent>        Conectarse a la tmux session del agente
+  run <project> <agent> "<cmd>"   Ejecutar comando arbitrario en el worktree
+EOF
+    else
+    cat <<EOF
+${SWARM_C_BOLD}/swarm${SWARM_C_RESET}  -  execution control
+
+  start <project> [agent]         Launch agents (all or a specific one)
+  stop <project> [agent]          Stop agents
+  status [project]                Show global or per-project status
+  logs <project> <agent> [--follow]
+  attach <project> <agent>        Attach to the agent's tmux session
+  run <project> <agent> "<cmd>"   Run an arbitrary command in the worktree
+EOF
+    fi
+}
+
+swarm_session_name() {
+    local project="$1" agent="$2"
+    echo "asis-${project}-${agent}"
+}
+
+swarm_start_agent() {
+    local project="$1" agent="$2"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    local device branch wt task
+    device="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .device' "$pfile")"
+    branch="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .branch' "$pfile")"
+    wt="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .worktree' "$pfile")"
+    task="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .task' "$pfile")"
+
+    if [ -z "$wt" ] || [ "$wt" = "null" ] || [ "$wt" = "" ]; then
+        swarm_warn "$(hf_t "Agent '$agent' has no worktree. Creating it..." "Agente '$agent' sin worktree. Creándolo...")"
+        swarm_wt_create "$project" "$agent" "$branch" || return 1
+        wt="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .worktree' "$pfile")"
+    fi
+
+    local session
+    session="$(swarm_session_name "$project" "$agent")"
+    swarm_info "$(hf_t "Launching '$agent' on '$device' (session=$session)" "Lanzando '$agent' en '$device' (session=$session)")"
+
+    # Detectar si ya existe la sesión
+    local exists
+    exists="$(swarm_wt_run_on_device "$device" "tmux has-session -t '$session' 2>/dev/null && echo YES || echo NO")"
+    if echo "$exists" | grep -q YES; then
+        swarm_warn "$(hf_t "Session '$session' already exists on '$device'." "Sesión '$session' ya existe en '$device'.")"
+        return 0
+    fi
+
+    # Determinar tool del agente: fijado con '/agents set/choose',
+    # o automático según el tipo de tarea si no hay uno (o es "auto")
+    local tool
+    tool="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .tool // "auto"' "$pfile")"
+
+    # Construir prompt inicial
+    local prompt
+    if [ -n "$task" ] && [ "$task" != "null" ] && [ "$task" != "" ]; then
+        prompt="$task"
+    else
+        prompt="Estás trabajando en el branch $branch del proyecto $project. Espera instrucciones."
+    fi
+
+    if [ "$tool" = "auto" ] || [ "$tool" = "null" ] || [ -z "$tool" ]; then
+        if type cli_select &>/dev/null; then
+            local task_type
+            task_type="$(cli_infer_task_type "$prompt")"
+            tool="$(cli_select "$task_type")"
+            swarm_info "$(hf_t "Auto-selected tool: '$tool' (task type '$task_type')" "Tool automático: '$tool' (tarea tipo '$task_type')")"
+        fi
+        # Sin orquestador o sin tools detectados: default histórico
+        [ -z "$tool" ] && tool="claude"
+    fi
+
+    # Construir comando usando cli_orchestrator si está disponible
+    local launch_cmd
+    if type cli_build_cmd &>/dev/null; then
+        # Flag de autonomía propio de cada tool (no todos aceptan el de claude)
+        local auto_flag="${CLI_AUTO_FLAGS[$tool]:-}"
+        launch_cmd="$(cli_build_cmd "$tool" "$prompt" "$auto_flag")"
+    else
+        local escaped_prompt
+        escaped_prompt="$(printf '%q' "$prompt")"
+        launch_cmd="claude --dangerously-skip-permissions $escaped_prompt"
+    fi
+
+    swarm_wt_run_on_device "$device" bash -lc "
+        set -e
+        cd \"$wt\"
+        tmux new-session -d -s \"$session\" -c \"$wt\" \"$launch_cmd; bash\"
+    "
+    if [ $? -eq 0 ]; then
+        swarm_ok "$(hf_t "Agent '$agent' running on '$device' (tmux: $session)" "Agente '$agent' corriendo en '$device' (tmux: $session)")"
+        local tmp
+        tmp="$(mktemp)"
+        jq --arg a "$agent" --arg s "$session" \
+            '(.agents[] | select(.name==$a) | .status)  = "running"
+           | (.agents[] | select(.name==$a) | .session) = $s' \
+            "$pfile" > "$tmp" && mv "$tmp" "$pfile"
+    else
+        swarm_error "$(hf_t "Failed to start '$agent' on '$device'." "Falló el arranque de '$agent' en '$device'.")"
+        return 1
+    fi
+}
+
+swarm_start() {
+    local project="$1" only_agent="$2"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    [ ! -f "$pfile" ] && { swarm_error "$(hf_t "Project '$project' does not exist." "Proyecto '$project' no existe.")"; return 1; }
+    if [ -n "$only_agent" ]; then
+        swarm_start_agent "$project" "$only_agent"
+        return $?
+    fi
+    local agents
+    agents="$(jq -r '.agents[].name' "$pfile")"
+    if [ -z "$agents" ]; then
+        swarm_warn "$(hf_t "Project '$project' has no agents." "Proyecto '$project' sin agentes.")"
+        return 0
+    fi
+    while read -r a; do
+        [ -z "$a" ] && continue
+        swarm_start_agent "$project" "$a"
+    done <<< "$agents"
+}
+
+swarm_stop_agent() {
+    local project="$1" agent="$2"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    local device session
+    device="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .device' "$pfile")"
+    session="$(swarm_session_name "$project" "$agent")"
+    swarm_info "$(hf_t "Stopping '$agent' on '$device'..." "Deteniendo '$agent' en '$device'...")"
+    swarm_wt_run_on_device "$device" "tmux kill-session -t '$session' 2>/dev/null || true"
+    local tmp
+    tmp="$(mktemp)"
+    jq --arg a "$agent" \
+        '(.agents[] | select(.name==$a) | .status) = "stopped"' \
+        "$pfile" > "$tmp" && mv "$tmp" "$pfile"
+    swarm_ok "$(hf_t "Agent '$agent' stopped." "Agente '$agent' detenido.")"
+}
+
+swarm_stop() {
+    local project="$1" only_agent="$2"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    [ ! -f "$pfile" ] && { swarm_error "$(hf_t "Project '$project' does not exist." "Proyecto '$project' no existe.")"; return 1; }
+    if [ -n "$only_agent" ]; then
+        swarm_stop_agent "$project" "$only_agent"
+        return $?
+    fi
+    local agents
+    agents="$(jq -r '.agents[].name' "$pfile")"
+    while read -r a; do
+        [ -z "$a" ] && continue
+        swarm_stop_agent "$project" "$a"
+    done <<< "$agents"
+}
+
+swarm_status() {
+    local project="$1"
+    if [ -n "$project" ]; then
+        local pfile
+        pfile="$(swarm_project_file "$project")"
+        [ ! -f "$pfile" ] && { swarm_error "$(hf_t "Project '$project' does not exist." "Proyecto '$project' no existe.")"; return 1; }
+        echo -e "${SWARM_C_BOLD}$(hf_t "Project: $project" "Proyecto: $project")${SWARM_C_RESET}"
+        swarm_agent_list "$project"
+        return 0
+    fi
+    for f in "$SWARM_PROJECTS_DIR"/*.json; do
+        [ -e "$f" ] || continue
+        local name
+        name="$(jq -r '.name' "$f")"
+        echo -e "${SWARM_C_BOLD}▸ $(hf_t "Project: $name" "Proyecto: $name")${SWARM_C_RESET}"
+        swarm_agent_list "$name"
+        echo
+    done
+}
+
+swarm_logs() {
+    local project="$1" agent="$2" follow="$3"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    local device session
+    device="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .device' "$pfile")"
+    session="$(swarm_session_name "$project" "$agent")"
+
+    if [ "$follow" = "--follow" ] || [ "$follow" = "-f" ]; then
+        swarm_info "$(hf_t "Following logs for '$agent' on '$device' (Ctrl+C to exit)..." "Siguiendo logs de '$agent' en '$device' (Ctrl+C para salir)...")"
+        swarm_wt_run_on_device "$device" "tmux pipe-pane -o -t '$session' 'cat >> /tmp/${session}.log'; tail -f /tmp/${session}.log"
+    else
+        swarm_wt_run_on_device "$device" "tmux capture-pane -p -t '$session' 2>/dev/null | tail -100"
+    fi
+}
+
+swarm_attach() {
+    local project="$1" agent="$2"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    local device session ip user port
+    device="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .device' "$pfile")"
+    session="$(swarm_session_name "$project" "$agent")"
+    ip="$(swarm_device_field "$device" ip)"
+    user="$(swarm_device_field "$device" user)"
+    port="$(swarm_device_field "$device" port)"
+    [ -z "$port" ] && port=22
+
+    local my_ip
+    my_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [ "$ip" = "127.0.0.1" ] || [ "$ip" = "$my_ip" ]; then
+        tmux attach -t "$session"
+    else
+        swarm_info "$(hf_t "Opening remote tmux at ${user}@${ip}:${port} (session=$session)" "Abriendo tmux remoto en ${user}@${ip}:${port} (session=$session)")"
+        ssh -t -p "$port" "${user}@${ip}" "tmux attach -t '$session'"
+    fi
+}
+
+swarm_run() {
+    local project="$1" agent="$2"; shift 2
+    local cmd="$*"
+    local pfile
+    pfile="$(swarm_project_file "$project")"
+    local device wt
+    device="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .device' "$pfile")"
+    wt="$(jq -r --arg a "$agent" '.agents[] | select(.name==$a) | .worktree' "$pfile")"
+    swarm_info "$(hf_t "Running on $device:$wt > $cmd" "Ejecutando en $device:$wt > $cmd")"
+    swarm_wt_run_on_device "$device" "cd \"$wt\" && $cmd"
+}

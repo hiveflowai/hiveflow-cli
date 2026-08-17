@@ -1,0 +1,547 @@
+#!/bin/bash
+
+# ==========================================
+# MÓDULO SWARM WIZARD - swarm_wizard.sh
+# ==========================================
+# Interfaz interactiva para configurar el swarm:
+# - Elige rol (parent/child)
+# - Instala dependencias
+# - Configura Redis (parent)
+# - Enrola automáticamente (child)
+# - Despliega a Raspberries (parent → children) sin comandos manuales
+
+type hf_t >/dev/null 2>&1 || hf_t() { if [ "${HF_LANG:-en}" = "es" ] && [ -n "${2:-}" ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+
+swarm_wizard_help() {
+    if [ "${HF_LANG:-en}" = "es" ]; then
+    cat <<EOF
+${SWARM_C_BOLD}/swarm wizard${SWARM_C_RESET}  -  configuración interactiva del swarm
+
+Interfaz guiada para configurar el swarm de Raspberry Pi de forma automática.
+
+${SWARM_C_BOLD}USO${SWARM_C_RESET}
+  /swarm wizard
+
+${SWARM_C_BOLD}FUNCIONAMIENTO${SWARM_C_RESET}
+  - Detecta si el dispositivo ya tiene rol (parent/child)
+  - Para PARENT: opción de desplegar a devices hijo vía SSH
+  - Para CHILD: opción de reconfigurar
+  - Configura Redis, SSH keys, systemd services automáticamente
+  - Zero-touch deployment: un comando configura todo el swarm
+
+${SWARM_C_BOLD}PARENT${SWARM_C_RESET} (orquestador único del swarm)
+  - Instala y configura Redis como broker
+  - Genera token de enrolamiento
+  - Configura systemd listener para auto-enrollment
+  - Opción de desplegar a múltiples children vía SSH masivo
+
+${SWARM_C_BOLD}CHILD${SWARM_C_RESET} (worker, múltiples en el swarm)
+  - Se conecta al parent con token
+  - Auto-enrola en el inventario del parent
+  - Configura daemon para recibir comandos vía Redis
+  - Ejecuta tareas de forma autónoma
+
+${SWARM_C_BOLD}SKILLS INTEGRADOS${SWARM_C_RESET}
+  Después de configurar el swarm, Claude puede:
+  - /prd     → Generar Product Requirements Document
+  - /ralph   → Convertir PRD a formato JSON para Ralph
+  - /swarm   → Orquestar agentes distribuidos
+
+  Flujo completo:
+    1. Pídele a Claude: "crea un PRD para [feature]"
+    2. Pídele: "convierte este PRD a formato Ralph"
+    3. Ejecuta: /ralph start <proyecto> <agente> --prd prd.json
+
+  Ralph ejecuta Claude repetidamente hasta completar todo el PRD.
+
+${SWARM_C_BOLD}EJEMPLO${SWARM_C_RESET}
+  # En el parent (AGX):
+  /swarm wizard
+  → Elige "Desplegar a dispositivos hijo"
+  → Ingresa IPs: 192.168.50.10 192.168.50.11 192.168.50.12
+  → Usuario: johnolven (o pi)
+  → Contraseña para SSH keys
+
+  # Resultado: 3 Raspberries configuradas y listas
+  /swarm device list
+  /swarm run test-proyecto agent1 "hostname"
+
+${SWARM_C_BOLD}VER TAMBIÉN${SWARM_C_RESET}
+  /swarm help
+  /swarm device --help
+  /swarm bootstrap --help
+EOF
+    else
+    cat <<EOF
+${SWARM_C_BOLD}/swarm wizard${SWARM_C_RESET}  -  interactive swarm setup
+
+Guided interface to configure the Raspberry Pi swarm automatically.
+
+${SWARM_C_BOLD}USAGE${SWARM_C_RESET}
+  /swarm wizard
+
+${SWARM_C_BOLD}HOW IT WORKS${SWARM_C_RESET}
+  - Detects whether the device already has a role (parent/child)
+  - For PARENT: option to deploy to child devices via SSH
+  - For CHILD: option to reconfigure
+  - Configures Redis, SSH keys, systemd services automatically
+  - Zero-touch deployment: one command configures the whole swarm
+
+${SWARM_C_BOLD}PARENT${SWARM_C_RESET} (single orchestrator of the swarm)
+  - Installs and configures Redis as the broker
+  - Generates an enrollment token
+  - Configures a systemd listener for auto-enrollment
+  - Option to deploy to multiple children via mass SSH
+
+${SWARM_C_BOLD}CHILD${SWARM_C_RESET} (worker, many per swarm)
+  - Connects to the parent using the token
+  - Auto-enrolls in the parent's inventory
+  - Configures a daemon to receive commands via Redis
+  - Runs tasks autonomously
+
+${SWARM_C_BOLD}INTEGRATED SKILLS${SWARM_C_RESET}
+  After configuring the swarm, Claude can:
+  - /prd     → Generate a Product Requirements Document
+  - /ralph   → Convert a PRD to Ralph JSON format
+  - /swarm   → Orchestrate distributed agents
+
+  Full flow:
+    1. Ask Claude: "create a PRD for [feature]"
+    2. Ask: "convert this PRD to Ralph format"
+    3. Run: /ralph start <project> <agent> --prd prd.json
+
+  Ralph runs Claude repeatedly until the whole PRD is complete.
+
+${SWARM_C_BOLD}EXAMPLE${SWARM_C_RESET}
+  # On the parent (AGX):
+  /swarm wizard
+  → Choose "Deploy to child devices"
+  → Enter IPs: 192.168.50.10 192.168.50.11 192.168.50.12
+  → User: johnolven (or pi)
+  → Password for SSH keys
+
+  # Result: 3 Raspberries configured and ready
+  /swarm device list
+  /swarm run test-project agent1 "hostname"
+
+${SWARM_C_BOLD}SEE ALSO${SWARM_C_RESET}
+  /swarm help
+  /swarm device --help
+  /swarm bootstrap --help
+EOF
+    fi
+}
+
+_wiz_title() {
+    echo
+    echo -e "${SWARM_C_BOLD}════════════════════════════════════════${SWARM_C_RESET}"
+    echo -e "${SWARM_C_BOLD}  $1${SWARM_C_RESET}"
+    echo -e "${SWARM_C_BOLD}════════════════════════════════════════${SWARM_C_RESET}"
+}
+
+_wiz_prompt() {
+    local msg="$1" default="$2" ans=""
+    if [ -n "$default" ]; then
+        read -p "$(echo -e "${SWARM_C_CYAN}?${SWARM_C_RESET} $msg [$default]: ")" ans
+        ans="${ans:-$default}"
+    else
+        read -p "$(echo -e "${SWARM_C_CYAN}?${SWARM_C_RESET} $msg: ")" ans
+    fi
+    echo "$ans"
+}
+
+_wiz_prompt_secret() {
+    local msg="$1" ans=""
+    read -s -p "$(echo -e "${SWARM_C_CYAN}?${SWARM_C_RESET} $msg: ")" ans
+    echo
+    echo "$ans"
+}
+
+_wiz_confirm() {
+    local msg="$1" default="${2:-Y}" ans=""
+    local hint="[Y/n]"
+    [ "$default" = "N" ] && hint="[y/N]"
+    read -p "$(echo -e "${SWARM_C_YELLOW}?${SWARM_C_RESET} $msg $hint: ")" ans
+    ans="${ans:-$default}"
+    [[ "$ans" =~ ^[Yy] ]]
+}
+
+_wiz_menu() {
+    local title="$1"; shift
+    local options=("$@")
+    echo >&2
+    echo -e "${SWARM_C_BOLD}$title${SWARM_C_RESET}" >&2
+    local i=1
+    for opt in "${options[@]}"; do
+        echo -e "  ${SWARM_C_CYAN}$i)${SWARM_C_RESET} $opt" >&2
+        i=$((i+1))
+    done
+    local choice
+    read -p "$(echo -e "${SWARM_C_CYAN}?${SWARM_C_RESET} $(hf_t "Option" "Opción"): ")" choice >&2
+    echo "$choice"
+}
+
+# ---------- Parent wizard ----------
+_wiz_parent() {
+    _wiz_title "$(hf_t "CONFIGURE AS PARENT" "CONFIGURAR COMO PARENT")"
+    echo "$(hf_t "This device will be the swarm's orchestrator (Redis broker)." "Este dispositivo será el orquestador del swarm (broker Redis).")"
+    echo
+
+    local default_ip
+    default_ip="$(ip -4 addr show 2>/dev/null | grep -oE '192\.168\.50\.[0-9]+' | head -1)"
+    [ -z "$default_ip" ] && default_ip="$(hostname -I | awk '{print $1}')"
+    local swarm_ip
+    swarm_ip="$(_wiz_prompt "$(hf_t "IP for the swarm" "IP para el swarm")" "$default_ip")"
+
+    # 1. Dependencias
+    echo
+    swarm_info "$(hf_t "Checking dependencies..." "Verificando dependencias...")"
+    local missing=()
+    for cmd in jq tmux redis-server redis-cli git ssh; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        swarm_warn "$(hf_t "Missing: ${missing[*]}" "Faltan: ${missing[*]}")"
+        if _wiz_confirm "$(hf_t "Install with apt-get?" "¿Instalar con apt-get?")"; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                curl git tmux jq redis-server redis-tools openssh-client sshpass
+        else
+            swarm_error "$(hf_t "Cannot continue without dependencies." "No se puede continuar sin dependencias.")"
+            return 1
+        fi
+    fi
+
+    # 2. Configurar Redis
+    echo
+    swarm_info "$(hf_t "Configuring Redis to listen on $swarm_ip..." "Configurando Redis para escuchar en $swarm_ip...")"
+    local redis_conf="/etc/redis/redis.conf"
+    if [ -f "$redis_conf" ]; then
+        if ! sudo grep -qE "^bind .*${swarm_ip}" "$redis_conf"; then
+            sudo sed -i "s/^bind 127.0.0.1.*$/bind 127.0.0.1 $swarm_ip/" "$redis_conf"
+        fi
+        sudo sed -i 's/^protected-mode yes/protected-mode no/' "$redis_conf"
+        sudo systemctl enable redis-server >/dev/null 2>&1
+        sudo systemctl restart redis-server
+        if redis-cli -h "$swarm_ip" ping 2>/dev/null | grep -q PONG; then
+            swarm_ok "$(hf_t "Redis listening on $swarm_ip:6379" "Redis escuchando en $swarm_ip:6379")"
+        else
+            swarm_error "$(hf_t "Redis not responding at $swarm_ip" "Redis no responde en $swarm_ip")"
+            return 1
+        fi
+    fi
+
+    # 3. Init rol parent
+    echo
+    swarm_info "$(hf_t "Initializing parent role..." "Inicializando rol parent...")"
+    swarm_role_init_parent "$swarm_ip"
+
+    # 4. Systemd unit para enrollment listener
+    echo
+    if _wiz_confirm "$(hf_t "Configure the enrollment listener as a systemd service?" "¿Configurar enrollment listener como servicio systemd?")"; then
+        local service_file="/etc/systemd/system/hiveflow-enroll.service"
+        local bin_path
+        bin_path="$(command -v hiveflow || command -v coder || echo "$HOME/.local/bin/hiveflow")"
+        [ ! -x "$bin_path" ] && bin_path="$HIVEFLOW_ROOT/hiveflow.sh"
+
+        sudo tee "$service_file" >/dev/null <<EOF
+[Unit]
+Description=Hiveflow Swarm Enrollment Listener
+After=redis-server.service network-online.target
+Wants=network-online.target redis-server.service
+
+[Service]
+Type=simple
+User=$USER
+Environment=HOME=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$bin_path swarm enroll listen
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable hiveflow-enroll.service >/dev/null 2>&1
+        sudo systemctl restart hiveflow-enroll.service
+        sleep 1
+        if systemctl is-active --quiet hiveflow-enroll.service; then
+            swarm_ok "$(hf_t "Listener active (hiveflow-enroll.service)" "Listener activo (hiveflow-enroll.service)")"
+        else
+            swarm_warn "$(hf_t "Listener did not start. Check: journalctl -u hiveflow-enroll.service" "Listener no arrancó. Revisa: journalctl -u hiveflow-enroll.service")"
+        fi
+    fi
+
+    # 5. Deploy a children (opcional)
+    echo
+    if _wiz_confirm "$(hf_t "Deploy to child devices now?" "¿Desplegar a dispositivos hijo ahora?")"; then
+        _wiz_deploy_children
+    fi
+
+    _wiz_title "$(hf_t "PARENT READY" "PARENT LISTO")"
+    local token
+    token="$(jq -r '.token' "$SWARM_ROLE_FILE")"
+    echo "  IP:     $swarm_ip"
+    echo "  Token:  $token"
+    echo
+    echo "$(hf_t "To add more children later:" "Para agregar más children después:")"
+    echo "  /swarm wizard"
+    echo "  $(hf_t "→ option 'Add child to the existing swarm'" "→ opción 'Agregar child al swarm existente'")"
+    echo
+}
+
+_wiz_deploy_children() {
+    _wiz_title "$(hf_t "DEPLOY TO CHILDREN" "DESPLEGAR A CHILDREN")"
+
+    # Verificar y configurar Redis si no está escuchando en la red
+    local parent_ip
+    parent_ip="$(jq -r '.ip' "$SWARM_ROLE_FILE" 2>/dev/null)"
+    if [ -n "$parent_ip" ]; then
+        if ! redis-cli -h "$parent_ip" ping >/dev/null 2>&1; then
+            swarm_warn "$(hf_t "Redis is not listening on $parent_ip. Configuring..." "Redis no escucha en $parent_ip. Configurando...")"
+            local redis_conf="/etc/redis/redis.conf"
+            if [ -f "$redis_conf" ]; then
+                if ! sudo grep -qE "^bind .*${parent_ip}" "$redis_conf"; then
+                    sudo sed -i "s/^bind 127.0.0.1.*$/bind 127.0.0.1 $parent_ip/" "$redis_conf"
+                fi
+                sudo sed -i 's/^protected-mode yes/protected-mode no/' "$redis_conf"
+                sudo systemctl restart redis-server
+                sleep 2
+                if redis-cli -h "$parent_ip" ping 2>/dev/null | grep -q PONG; then
+                    swarm_ok "$(hf_t "Redis now listening on $parent_ip:6379" "Redis ahora escucha en $parent_ip:6379")"
+                else
+                    swarm_error "$(hf_t "Redis not responding. Check the configuration manually." "Redis no responde. Verifica la configuración manualmente.")"
+                    return 1
+                fi
+            fi
+        else
+            swarm_ok "$(hf_t "Redis already listening on $parent_ip:6379" "Redis ya escucha en $parent_ip:6379")"
+        fi
+    fi
+
+    local default_user="pi"
+    local user
+    user="$(_wiz_prompt "$(hf_t "SSH user on the Raspberries" "Usuario SSH en las Raspberries")" "$default_user")"
+
+    echo
+    echo "$(hf_t "Enter the children's IPs, separated by spaces." "Ingresa las IPs de los hijos, separadas por espacio.")"
+    echo "$(hf_t "Example: 192.168.50.10 192.168.50.11 192.168.50.12" "Ejemplo: 192.168.50.10 192.168.50.11 192.168.50.12")"
+    local ips_line
+    ips_line="$(_wiz_prompt "IPs" "")"
+    if [ -z "$ips_line" ]; then
+        swarm_warn "$(hf_t "No IPs. Skipping deploy." "Sin IPs. Saltando deploy.")"
+        return 0
+    fi
+
+    read -ra ips <<< "$ips_line"
+
+    # ¿SSH ya configurado?
+    echo
+    local needs_keys=false
+    for ip in "${ips[@]}"; do
+        if ! ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new \
+              "${user}@${ip}" 'echo ok' >/dev/null 2>&1; then
+            needs_keys=true
+            break
+        fi
+    done
+
+    local password=""
+    if $needs_keys; then
+        swarm_warn "$(hf_t "SSH has no keys. I need '$user's password to set up access." "SSH sin llaves. Necesito la contraseña de '$user' para configurar acceso.")"
+        if ! command -v sshpass >/dev/null 2>&1; then
+            swarm_info "$(hf_t "Installing sshpass..." "Instalando sshpass...")"
+            sudo apt-get install -y -qq sshpass
+        fi
+        password="$(_wiz_prompt_secret "$(hf_t "Password for $user" "Contraseña de $user")")"
+
+        # Generar llave si no existe
+        if [ ! -f "$HOME/.ssh/id_ed25519" ] && [ ! -f "$HOME/.ssh/id_rsa" ]; then
+            swarm_info "$(hf_t "Generating SSH key..." "Generando llave SSH...")"
+            ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -q
+        fi
+
+        echo
+        swarm_info "$(hf_t "Copying key to each child..." "Copiando llave a cada child...")"
+        for ip in "${ips[@]}"; do
+            echo -n "  → ${user}@${ip}: "
+            if sshpass -p "$password" ssh-copy-id -o StrictHostKeyChecking=accept-new \
+                "${user}@${ip}" >/dev/null 2>&1; then
+                echo -e "${SWARM_C_GREEN}ok${SWARM_C_RESET}"
+            else
+                echo -e "${SWARM_C_RED}$(hf_t "failed" "falló")${SWARM_C_RESET}"
+            fi
+        done
+    fi
+
+    # Desplegar con bootstrap-child
+    echo
+    swarm_info "$(hf_t "Deploying asis-coder + daemon to each child..." "Desplegando asis-coder + daemon en cada child...")"
+    swarm_bootstrap_children "${ips[@]}" --user "$user"
+
+    # Procesar enrolamientos
+    echo
+    swarm_info "$(hf_t "Processing pending enrollments..." "Procesando enrolamientos pendientes...")"
+    sleep 2
+    swarm_enroll_process
+
+    echo
+    swarm_info "$(hf_t "Final status:" "Estado final:")"
+    swarm_device_list
+}
+
+# ---------- Child wizard ----------
+_wiz_child() {
+    _wiz_title "$(hf_t "CONFIGURE AS CHILD" "CONFIGURAR COMO CHILD")"
+    echo "$(hf_t "This device will register with an existing parent." "Este dispositivo se registrará en un parent existente.")"
+    echo
+
+    local parent_ip token name
+    parent_ip="$(_wiz_prompt "$(hf_t "Parent IP" "IP del parent")" "192.168.50.1")"
+    token="$(_wiz_prompt "$(hf_t "Enrollment token" "Token de enrolamiento")" "")"
+    if [ -z "$token" ]; then
+        swarm_error "$(hf_t "The token is required. Get it on the parent with: /swarm role" "El token es obligatorio. Obténlo en el parent con: /swarm role")"
+        return 1
+    fi
+    name="$(_wiz_prompt "$(hf_t "Name for this child" "Nombre de este child")" "$(hostname)")"
+
+    # Dependencias
+    echo
+    swarm_info "$(hf_t "Checking dependencies..." "Verificando dependencias...")"
+    local missing=()
+    for cmd in jq tmux redis-cli git; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if ! command -v claude >/dev/null 2>&1; then
+        missing+=("claude")
+    fi
+    if [ ${#missing[@]} -gt 0 ]; then
+        swarm_warn "$(hf_t "Missing: ${missing[*]}" "Faltan: ${missing[*]}")"
+        if _wiz_confirm "$(hf_t "Install now?" "¿Instalar ahora?")"; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                curl git tmux jq redis-tools build-essential
+            if ! command -v node >/dev/null; then
+                curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+                sudo apt-get install -y -qq nodejs
+            fi
+            if ! command -v claude >/dev/null; then
+                sudo npm install -g @anthropic-ai/claude-code || \
+                    npm install -g @anthropic-ai/claude-code
+            fi
+        else
+            return 1
+        fi
+    fi
+
+    # Init rol child
+    echo
+    swarm_info "$(hf_t "Initializing as child and enrolling..." "Inicializando como child y enrolando...")"
+    swarm_role_init_child --parent "$parent_ip" --token "$token" --name "$name"
+
+    # Systemd daemon
+    echo
+    if _wiz_confirm "$(hf_t "Start the daemon as a systemd service?" "¿Arrancar daemon como servicio systemd?")"; then
+        local service_file="/etc/systemd/system/hiveflow-daemon.service"
+        local bin_path
+        bin_path="$(command -v hiveflow || command -v coder || echo "$HOME/.local/bin/hiveflow")"
+        [ ! -x "$bin_path" ] && bin_path="$HIVEFLOW_ROOT/hiveflow.sh"
+
+        sudo tee "$service_file" >/dev/null <<EOF
+[Unit]
+Description=Hiveflow Swarm Daemon (child worker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$USER
+Environment=HOME=$HOME
+Environment=PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$bin_path swarm daemon start --foreground
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo systemctl daemon-reload
+        sudo systemctl enable hiveflow-daemon.service >/dev/null 2>&1
+        sudo systemctl restart hiveflow-daemon.service
+        sleep 1
+        if systemctl is-active --quiet hiveflow-daemon.service; then
+            swarm_ok "$(hf_t "Daemon active" "Daemon activo")"
+        else
+            swarm_warn "$(hf_t "Daemon did not start. Check: journalctl -u hiveflow-daemon.service" "Daemon no arrancó. Revisa: journalctl -u hiveflow-daemon.service")"
+        fi
+    else
+        swarm_info "$(hf_t "Starting daemon in background..." "Iniciando daemon en background...")"
+        swarm_daemon_start
+    fi
+
+    _wiz_title "$(hf_t "CHILD READY" "CHILD LISTO")"
+    echo "  $(hf_t "Name:     $name" "Nombre:   $name")"
+    echo "  Parent:   $parent_ip"
+    echo
+    echo "$(hf_t "On the parent, run '/swarm device list' to see it." "En el parent, ejecuta '/swarm device list' para verlo.")"
+}
+
+# ---------- Entry point ----------
+swarm_wizard_run() {
+    # Check for help flag
+    if [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]] || [[ "$1" == "help" ]]; then
+        swarm_wizard_help
+        return 0
+    fi
+
+    clear 2>/dev/null || true
+    echo -e "${SWARM_C_BOLD}"
+    cat <<'EOF'
+   ___      _      _____          __
+  / _ |___ (_)__  / ___/__  ___/ ___/___
+ / __ / _ \/ (_-< / /__/ _ \/ _  / -_) __/
+/_/ |_\___/_/___/ \___/\___/\_,_/\__/_/
+
+   Swarm Wizard
+EOF
+    echo -e "${SWARM_C_RESET}"
+    echo "$(hf_t "Interactive setup for the distributed swarm." "Configuración interactiva del enjambre distribuido.")"
+
+    local current_role
+    current_role="$(swarm_role_get)"
+    if [ -n "$current_role" ]; then
+        echo
+        swarm_warn "$(hf_t "This device already has a role: $current_role" "Este dispositivo ya tiene rol: $current_role")"
+
+        if [ "$current_role" = "parent" ]; then
+            local choice
+            choice="$(_wiz_menu "$(hf_t "What do you want to do?" "¿Qué deseas hacer?")" \
+                "$(hf_t "Deploy to child devices (children)" "Desplegar a dispositivos hijo (children)")" \
+                "$(hf_t "Reconfigure this device" "Reconfigurar este dispositivo")" \
+                "$(hf_t "Cancel" "Cancelar")")"
+
+            case "$choice" in
+                1) _wiz_deploy_children; return 0 ;;
+                2) ;; # continuar a reconfiguración
+                *) swarm_info "$(hf_t "Cancelled." "Cancelado.")"; return 0 ;;
+            esac
+        else
+            if ! _wiz_confirm "$(hf_t "Continue and reconfigure?" "¿Continuar y reconfigurar?")" "N"; then
+                exit 0
+            fi
+        fi
+    fi
+
+    local choice
+    choice="$(_wiz_menu "$(hf_t "Which role will this device have?" "¿Qué rol tendrá este dispositivo?")" \
+        "$(hf_t "PARENT (orchestrator, a single device in the swarm)" "PARENT (orquestador, un device único en el swarm)")" \
+        "$(hf_t "CHILD (worker that connects to an existing parent)" "CHILD (worker que se conecta a un parent existente)")" \
+        "$(hf_t "Cancel" "Cancelar")")"
+
+    case "$choice" in
+        1) _wiz_parent ;;
+        2) _wiz_child  ;;
+        *) swarm_info "$(hf_t "Cancelled." "Cancelado.")" ;;
+    esac
+}
