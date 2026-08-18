@@ -119,7 +119,7 @@ hf_help_topic_en() {
         echo "    /prd                Generate a feature PRD"
         echo "    /ralph              Autonomous loops over a PRD"
       else
-        hf_err "$(hf_t "Swarm/Ralph features not available in public package" "Features Swarm/Ralph no disponibles en paquete público")"
+        hf_err "$(hf_t "Swarm/Ralph modules are not loaded yet — run /swarm to download them with your Hiveflow account" "Los módulos Swarm/Ralph aún no están cargados — ejecuta /swarm para descargarlos con tu cuenta Hiveflow")"
       fi
       ;;
     llm|ask)
@@ -286,7 +286,7 @@ hf_help_topic_es() {
         echo "    /prd                Generar un PRD de feature"
         echo "    /ralph              Loops autónomos sobre un PRD"
       else
-        hf_err "$(hf_t "Swarm/Ralph features not available in public package" "Features Swarm/Ralph no disponibles en paquete público")"
+        hf_err "$(hf_t "Swarm/Ralph modules are not loaded yet — run /swarm to download them with your Hiveflow account" "Los módulos Swarm/Ralph aún no están cargados — ejecuta /swarm para descargarlos con tu cuenta Hiveflow")"
       fi
       ;;
     llm|ask)
