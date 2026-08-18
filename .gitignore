@@ -1,0 +1,6 @@
+node_modules/
+*.log
+
+# proprietary — never commit to the public repo
+lib/engine/
+assets/ralph.sh
