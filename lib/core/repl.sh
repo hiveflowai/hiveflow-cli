@@ -812,6 +812,7 @@ hf_palette() {
     "/tickets|$(hf_t "Support tickets → PR pipeline" "Tickets de soporte → pipeline a PR")"
     "/fix|$(hf_t "Resolve a ticket end to end" "Resolver un ticket de principio a fin")"
     "/remote|$(hf_t "Remote Control: mirror this CLI in the web/app" "Remote Control: reflejar este CLI en la web/app")"
+    "/send|$(hf_t "Send a file (image/video/PDF) to the web conversation" "Enviar un archivo (imagen/video/PDF) a la conversación web")"
     "/review|$(hf_t "Agent reviews human-opened PRs" "El agente revisa PRs abiertos por humanos")"
     "/deploy|$(hf_t "Health checks of your endpoints" "Salud de tus endpoints")"
     "/intake|$(hf_t "Feed tickets from alerts/debt/audit" "Alimentar tickets desde alertas/deuda/audit")"
@@ -1346,6 +1347,7 @@ hf_handle_slash() {
     /routing)       hf_adaptive_report ;;
     /loop)          hf_loop_cmd $args ;;
     /remote)        hf_remote_cmd $args ;;
+    /send|/file)    hf_rc_send "$args" ;;
     # ── Native agent (own agentic engine) ──
     /agent)
       if [ -n "$args" ]; then

@@ -312,15 +312,18 @@ _hf_relay_poll() {
 }
 
 _hf_relay_respond() {
-  local sid="$1" mid="$2" output="$3"
+  local sid="$1" mid="$2" output="$3" files="${4:-[]}"
+  printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
   case "$(hf_remote_relay)" in
     local:*)
       local dir; dir="$(_hf_relay_local_dir)"
-      jq -nc --arg m "$mid" --arg o "$output" '{msg_id:$m, output:$o, status:"done"}' > "$dir/outbox/$mid.json" ;;
+      jq -nc --arg m "$mid" --arg o "$output" --argjson f "$files" \
+        '{msg_id:$m, output:$o, files:$f, status:"done"}' > "$dir/outbox/$mid.json" ;;
     http:*)
       local url; url="$(hf_remote_relay)"; url="${url#http:}"
-      curl -s -m 15 -X POST "${url}/respond" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
-        -d "$(jq -nc --arg s "$sid" --arg m "$mid" --arg o "$output" '{session_id:$s, msg_id:$m, output:$o}')" >/dev/null 2>&1 ;;
+      curl -s -m 30 -X POST "${url}/respond" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
+        -d "$(jq -nc --arg s "$sid" --arg m "$mid" --arg o "$output" --argjson f "$files" \
+              '{session_id:$s, msg_id:$m, output:$o, files:$f}')" >/dev/null 2>&1 ;;
   esac
 }
 
@@ -436,30 +439,124 @@ _hf_rc_activity() {
   esac
 }
 
+# ─── Adjuntos del espejo ───────────────────────────────────────
+# Lo que la terminal ve, la web lo VE. Sin esto el puente solo mueve texto:
+# la terminal abre/produce una imagen, un PDF o un video y en Genius aparece
+# una descripción, no el archivo. Aquí se sube y viaja con la respuesta.
+HF_RC_MEDIA_EXT='png|jpe?g|gif|webp|avif|svg|heic|pdf|mp4|mov|webm|m4v|mp3|wav|csv|xlsx?|docx?|pptx?|zip|json|md|txt|log'
+HF_RC_UPLOAD_MAX_BYTES="${HF_RC_UPLOAD_MAX_BYTES:-26214400}"   # 25 MB (tope del backend)
+HF_RC_MAX_FILES="${HF_RC_MAX_FILES:-3}"
+
+# Resuelve lo que el CLI mencionó a una ruta real: absoluta, ~, o un nombre
+# suelto ("INE.png") buscado en los sitios obvios.
+_hf_rc_resolve_path() {
+  local p="$1" d
+  p="${p%[,.;:]}"; p="${p%\)}"; p="${p%\"}"; p="${p%\'}"
+  case "$p" in "~"/*) p="$HOME/${p#\~/}" ;; esac
+  case "$p" in
+    /*) [ -f "$p" ] && { printf '%s' "$p"; return 0; }; return 1 ;;
+  esac
+  for d in "$PWD" "$HOME/Desktop" "$HOME/Escritorio" "$HOME/Downloads" "$HOME/Documents" "$HOME"; do
+    [ -f "$d/$p" ] && { printf '%s' "$d/$p"; return 0; }
+  done
+  return 1
+}
+
+# Sube UN archivo y devuelve su objeto JSON ({name,url,type,size}) o nada.
+_hf_rc_upload_one() {
+  local f="$1" sid url size resp
+  [ -f "$f" ] || return 1
+  case "$(hf_remote_relay)" in http:*) url="$(hf_remote_relay)"; url="${url#http:}" ;; *) return 1 ;; esac
+  size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  if [ "${size:-0}" -gt "$HF_RC_UPLOAD_MAX_BYTES" ]; then
+    hf_warn "$(hf_t "Too big to send ($(( size / 1048576 )) MB): $f" "Muy grande para enviar ($(( size / 1048576 )) MB): $f")" >/dev/tty 2>/dev/null || true
+    return 1
+  fi
+  sid="$(cat "$(_hf_rc_state_dir)/session" 2>/dev/null)"
+  resp="$(curl -s -m 180 -X POST "${url}/upload" \
+    -H "Authorization: Bearer $(hf_auth_token)" \
+    -F "session_id=${sid}" -F "file=@${f}" 2>/dev/null)"
+  printf '%s' "$resp" | jq -c 'select(.ok == true) | .file' 2>/dev/null
+}
+
+# Junta los archivos de un turno y los sube. Fuentes, en orden:
+#   1. marcador explícito  HF_SEND: /ruta/absoluta   (lo imprime el CLI)
+#   2. rutas o nombres de archivo de medios que aparecen en la salida
+# Devuelve un array JSON (vacío si no hay nada que mandar).
+_hf_rc_collect_files() {
+  local out="$1" cand resolved n=0 json="[]" item
+  local seen=" "
+  while IFS= read -r cand; do
+    [ -z "$cand" ] && continue
+    [ "$n" -ge "$HF_RC_MAX_FILES" ] && break
+    resolved="$(_hf_rc_resolve_path "$cand")" || continue
+    case "$seen" in *" $resolved "*) continue ;; esac
+    seen="$seen$resolved "
+    item="$(_hf_rc_upload_one "$resolved")" || continue
+    [ -z "$item" ] && continue
+    json="$(printf '%s' "$json" | jq -c --argjson f "$item" '. + [$f]' 2>/dev/null || printf '%s' "$json")"
+    n=$((n + 1))
+  done < <(
+    # 1. marcador explícito: la línea entera es la ruta (admite espacios)
+    printf '%s\n' "$out" | sed -n 's/^[[:space:]]*HF_SEND:[[:space:]]*//p'
+    # 2. rutas entrecomilladas (así viajan los nombres con espacios)
+    printf '%s\n' "$out" | grep -oE "[\"'\`][^\"'\`]+\.($HF_RC_MEDIA_EXT)[\"'\`]" 2>/dev/null | sed -e 's/^.//' -e 's/.$//'
+    # 3. rutas o nombres sueltos SIN espacios
+    printf '%s\n' "$out" | grep -oE "[~/]?[A-Za-z0-9._/-]+\.($HF_RC_MEDIA_EXT)" 2>/dev/null
+  )
+  printf '%s' "$json"
+}
+
+# Con el espejo activo, el CLI que atiende a la web necesita saber que PUEDE
+# mandar archivos: se le pide que imprima el marcador en vez de describirlos.
+_hf_rc_prompt_with_files() {
+  printf '%s\n\n%s' "$1" "$(hf_t \
+"[Hiveflow Remote Control] You are answering someone who is NOT at this terminal: they read you in a web chat and cannot see this screen. If the answer involves a file (image, video, PDF, document) — because they asked to see it, or you produced it — print at the end one line per file, exactly: HF_SEND: /absolute/path. The bridge uploads it and shows it in the chat. Never claim a file was shown without that line." \
+"[Hiveflow Remote Control] Le respondes a alguien que NO está en esta terminal: te lee en un chat web y no ve esta pantalla. Si la respuesta involucra un archivo (imagen, video, PDF, documento) — porque pidió verlo, o porque lo generaste — imprime al final una línea por archivo, exactamente así: HF_SEND: /ruta/absoluta. El puente lo sube y lo muestra en el chat. Nunca digas que mostraste un archivo sin esa línea.")"
+}
+
+# /send <ruta> — mandar un archivo a la conversación de Genius a mano.
+hf_rc_send() {
+  local arg="$1" f item
+  if [ -z "$arg" ]; then
+    hf_err "$(hf_t "Usage: /send <path>  (image, video, PDF, document)" "Uso: /send <ruta>  (imagen, video, PDF, documento)")"; return 1
+  fi
+  if ! hf_rc_mirror_active 2>/dev/null; then
+    hf_err "$(hf_t "Remote Control is not mirroring. Connect it with /remote control" "Remote Control no está reflejando. Conéctalo con /remote control")"; return 1
+  fi
+  f="$(_hf_rc_resolve_path "$arg")" || { hf_err "$(hf_t "File not found: $arg" "Archivo no encontrado: $arg")"; return 1; }
+  hf_info "$(hf_t "Sending $(basename "$f") ..." "Enviando $(basename "$f") ...")"
+  item="$(_hf_rc_upload_one "$f")"
+  [ -z "$item" ] && { hf_err "$(hf_t "Could not upload the file" "No se pudo subir el archivo")"; return 1; }
+  _hf_rc_append assistant "$(basename "$f")" "[$item]"
+  hf_ok "$(hf_t "Sent — it now shows in the Genius conversation" "Enviado — ya se ve en la conversación de Genius")"
+}
+
 # Añade un mensaje a la conversación de Genius del espejo (best-effort).
 # Si la web la borró, el backend la recrea vacía y responde recreated=true:
 # resubimos TODO el historial local — la terminal es la fuente de verdad.
 _hf_rc_append() {
-  local role="$1" content="$2" sid url resp
+  local role="$1" content="$2" files="${3:-[]}" sid url resp
   hf_rc_mirror_active || return 0
   sid="$(cat "$(_hf_rc_state_dir)/session" 2>/dev/null)"
   [ -z "$sid" ] && return 0
+  printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
   case "$(hf_remote_relay)" in
     http:*)
       url="$(hf_remote_relay)"; url="${url#http:}"
       content="$(printf '%s' "$content" | sed -e $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' -e $'s/\r//g')"
-      resp="$(curl -s -m 10 -X POST "${url}/append" \
+      resp="$(curl -s -m 30 -X POST "${url}/append" \
         -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
-        -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" \
-              '{session_id:$s, role:$r, content:$c}')" 2>/dev/null)"
+        -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" --argjson f "$files" \
+              '{session_id:$s, role:$r, content:$c, files:$f}')" 2>/dev/null)"
       if [ "$(printf '%s' "$resp" | jq -r '.recreated // false' 2>/dev/null)" = "true" ]; then
         # Primero la historia completa, luego el mensaje que disparó el
         # renacer (el backend no lo añadió para preservar el orden).
         _hf_rc_backfill "$sid"
-        curl -s -m 10 -X POST "${url}/append" \
+        curl -s -m 30 -X POST "${url}/append" \
           -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
-          -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" \
-                '{session_id:$s, role:$r, content:$c}')" >/dev/null 2>&1
+          -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" --argjson f "$files" \
+                '{session_id:$s, role:$r, content:$c, files:$f}')" >/dev/null 2>&1
       fi ;;
   esac
 }
@@ -541,7 +638,9 @@ _hf_rc_daemon() {
       if [[ "$text" == /* ]]; then
         ( hf_handle_slash "$text" ) > "$outf" 2>&1 &
       else
-        ( HIVEFLOW_NO_SPINNER=1 hf_run_request "$text" ) > "$outf" 2>&1 &
+        # El prompt lleva la instrucción del marcador: quien pregunta está en
+        # la web y necesita el ARCHIVO, no su descripción.
+        ( HIVEFLOW_NO_SPINNER=1 hf_run_request "$(_hf_rc_prompt_with_files "$text")" ) > "$outf" 2>&1 &
       fi
       runpid=$!
       sent=0
@@ -565,7 +664,15 @@ _hf_rc_daemon() {
       # La web guarda texto plano: fuera códigos ANSI y retornos de carro
       out="$(sed -e $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' -e $'s/\r//g' "$outf")"
       rm -f "$outf"
-      _hf_relay_respond "$sid" "$mid" "$out"
+      # Adjuntos del turno: se suben y viajan con la respuesta; el marcador
+      # HF_SEND: es plomería, no se le muestra a quien lee en la web.
+      local rc_files
+      rc_files="$(_hf_rc_collect_files "$out")"
+      if [ "$rc_files" != "[]" ]; then
+        out="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*HF_SEND:' || printf '%s' "$out")"
+        { printf '  \033[38;5;51m📎\033[0m %s\n' "$(hf_t "sent $(printf '%s' "$rc_files" | jq -r 'length') file(s) to the web" "enviado(s) $(printf '%s' "$rc_files" | jq -r 'length') archivo(s) a la web")"; } > /dev/tty 2>/dev/null || true
+      fi
+      _hf_relay_respond "$sid" "$mid" "$out" "$rc_files"
       # Confirmar y devolver el prompt para que el usuario sepa que puede escribir
       { printf '  \033[32m✓\033[0m %s\n\n%s' "$(hf_t "answered to the web" "respondido a la web")" "$(hf_prompt_label)"; } > /dev/tty 2>/dev/null || true
       hf_metric rc_message "" session="$sid"
