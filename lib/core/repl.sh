@@ -114,7 +114,7 @@ hf_help_topic_en() {
         echo -e "  ${HF_C_BOLD}Swarm and autonomous development${HF_C_RESET}"
         echo "    /swarm              Status (or /swarm help for full detail)"
         echo "    /swarm wizard       Assistant to set up the device swarm"
-        echo "    /agents             Which CLI each agent uses: list · choose · set"
+        echo "    /swarm tool         Which CLI each swarm agent uses: list · choose · set"
         echo "    /dashboard          Live dashboard"
         echo "    /prd                Generate a feature PRD"
         echo "    /ralph              Autonomous loops over a PRD"
@@ -281,7 +281,7 @@ hf_help_topic_es() {
         echo -e "  ${HF_C_BOLD}Swarm y desarrollo autónomo${HF_C_RESET}"
         echo "    /swarm              Estado (o /swarm help para todo el detalle)"
         echo "    /swarm wizard       Asistente para montar el swarm de devices"
-        echo "    /agents             Qué CLI usa cada agente: list · choose · set"
+        echo "    /swarm tool         Qué CLI usa cada agente del swarm: list · choose · set"
         echo "    /dashboard          Dashboard en vivo"
         echo "    /prd                Generar un PRD de feature"
         echo "    /ralph              Loops autónomos sobre un PRD"
@@ -386,7 +386,7 @@ hf_help_en() {
     echo -e "  ${HF_C_BOLD}🐝 Distributed swarm${HF_C_RESET} ${HF_C_DIM}(agents across devices)${HF_C_RESET}"
     echo "  /swarm              Swarm status (or /swarm help: full detail)"
     echo "  /swarm wizard       Guided assistant to set up the swarm"
-    echo "  /agents             Tools per agent: list · choose <proj> <agent> · set"
+    echo "  /swarm tool         Tools per swarm agent: list · choose <proj> <agent> · set"
     echo "  /dashboard          Live swarm dashboard"
     echo ""
     echo -e "  ${HF_C_BOLD}🤖 Autonomous development${HF_C_RESET}"
@@ -462,7 +462,7 @@ hf_help_es() {
     echo -e "  ${HF_C_BOLD}🐝 Swarm distribuido${HF_C_RESET} ${HF_C_DIM}(agentes en varios devices)${HF_C_RESET}"
     echo "  /swarm              Estado del swarm (o /swarm help: todo el detalle)"
     echo "  /swarm wizard       Asistente guiado para montar el swarm"
-    echo "  /agents             Tools por agente: list · choose <proy> <agente> · set"
+    echo "  /swarm tool         Tools por agente del swarm: list · choose <proy> <agente> · set"
     echo "  /dashboard          Dashboard del swarm en vivo"
     echo ""
     echo -e "  ${HF_C_BOLD}🤖 Desarrollo autónomo${HF_C_RESET}"
@@ -821,7 +821,7 @@ hf_palette() {
     "/loop|$(hf_t "Agentic loop stats and traces" "Stats y trazas de loops agénticos")"
     "/health|$(hf_t "Check the AI CLIs respond" "Comprobar que los AI CLIs responden")"
     "/swarm|$(hf_t "Distributed agents across devices" "Agentes distribuidos en devices")"
-    "/agents|$(hf_t "Tool per swarm agent" "Tool por agente del swarm")"
+    "/agents|$(hf_t "Your agent team: list · open a conversation" "Tu equipo de agentes: lista · abre una conversación")"
     "/dashboard|$(hf_t "Live swarm dashboard" "Dashboard del swarm en vivo")"
     "/prd|$(hf_t "Generate a feature PRD" "Generar un PRD de feature")"
     "/ralph|$(hf_t "Autonomous loops over a PRD" "Loops autónomos sobre un PRD")"
@@ -1312,9 +1312,10 @@ hf_handle_slash() {
       fi ;;
     /health)        hf_tools_health ;;
     /status)        hf_status ;;
+    # ── Equipo de agentes (web/desktop/móvil) ──
+    /agents)        hf_agents_cmd $args ;;
     # ── Swarm engine (vendored from asis-coder) ──
     /swarm)         hf_engine_dispatch ${args:-status} ;;
-    /agents)        hf_engine_dispatch tool ${args:-list} ;;
     /dashboard)     hf_engine_dispatch dashboard $args ;;
     /prd)           hf_engine_dispatch prd $args ;;
     /ralph)         hf_engine_dispatch ralph ${args:-help} ;;
@@ -1347,7 +1348,6 @@ hf_handle_slash() {
     /routing)       hf_adaptive_report ;;
     /loop)          hf_loop_cmd $args ;;
     /remote)        hf_remote_cmd $args ;;
-    /agents)        hf_agents_cmd $args ;;
     /send|/file)    hf_rc_send "$args" ;;
     # ── Native agent (own agentic engine) ──
     /agent)
