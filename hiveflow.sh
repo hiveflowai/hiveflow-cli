@@ -17,7 +17,7 @@ while [ -h "$_hf_src" ]; do
 done
 HIVEFLOW_ROOT="$(cd -P "$(dirname "$_hf_src")" && pwd)"
 
-for _mod in i18n.sh ui.sh config.sh prompts.sh update.sh auth.sh tools.sh router.sh llm.sh metrics.sh tickets.sh workers.sh intake.sh eval.sh deploy.sh review.sh loop.sh remote.sh engine.sh agent.sh repl.sh; do
+for _mod in i18n.sh ui.sh config.sh prompts.sh update.sh auth.sh tools.sh router.sh llm.sh metrics.sh tickets.sh workers.sh blurb.sh intake.sh eval.sh deploy.sh review.sh loop.sh remote.sh agents.sh engine.sh agent.sh repl.sh; do
   # shellcheck source=/dev/null
   source "$HIVEFLOW_ROOT/lib/core/$_mod"
 done
@@ -148,6 +148,9 @@ case "${1:-}" in
     ;;
   remote)
     shift; hf_remote_cmd "$@"; exit $?
+    ;;
+  agents)
+    shift; hf_agents_cmd "$@"; exit $?
     ;;
   loop)
     shift; hf_loop_cmd "$@"; exit $?

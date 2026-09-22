@@ -1347,6 +1347,7 @@ hf_handle_slash() {
     /routing)       hf_adaptive_report ;;
     /loop)          hf_loop_cmd $args ;;
     /remote)        hf_remote_cmd $args ;;
+    /agents)        hf_agents_cmd $args ;;
     /send|/file)    hf_rc_send "$args" ;;
     # ── Native agent (own agentic engine) ──
     /agent)
