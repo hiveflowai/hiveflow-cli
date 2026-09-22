@@ -152,6 +152,9 @@ case "${1:-}" in
   agents)
     shift; hf_agents_cmd "$@"; exit $?
     ;;
+  env)
+    shift; hf_env_cmd "$@"; exit $?
+    ;;
   loop)
     shift; hf_loop_cmd "$@"; exit $?
     ;;

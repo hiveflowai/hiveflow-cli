@@ -1396,6 +1396,7 @@ hf_handle_slash() {
       else
         hf_ask "$args"
       fi ;;
+    /env)           hf_env_cmd $args ;;
     /login)         hf_login ;;
     /logout)        hf_logout ;;
     /update)        hf_update_cmd $args ;;
