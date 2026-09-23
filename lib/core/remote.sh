@@ -710,9 +710,9 @@ _hf_rc_daemon() {
       okind="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
       oname="${rest%%$'\t'*}"; text="${rest#*$'\t'}"
       if [ "$okind" = "agent" ]; then
-        { printf '\n  \033[38;5;213m🤖 %s ❯\033[0m %s\n' "${oname:-agent}" "$text"; } > /dev/tty 2>/dev/null || true
+        { printf '\n  \033[38;5;213m🤖 %s ❯\033[0m %s\n' "${oname:-agent}" "$(hf_linkify "$text")"; } > /dev/tty 2>/dev/null || true
       else
-        { printf '\n  \033[38;5;51m🌐 web ❯\033[0m %s\n' "$text"; } > /dev/tty 2>/dev/null || true
+        { printf '\n  \033[38;5;51m🌐 web ❯\033[0m %s\n' "$(hf_linkify "$text")"; } > /dev/tty 2>/dev/null || true
       fi
       # MISMA ejecución que el REPL, pero con salida PROGRESIVA: cada línea
       # nueva se manda a la web (/progress) y se pinta en la terminal en vivo.

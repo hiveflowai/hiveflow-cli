@@ -79,14 +79,19 @@ _hf_agents_render() {
     # adjuntos embebidos con \x02
     local rest="$line" body
     body="${rest%%$'\x02'*}"
-    [ -n "$body" ] && printf '%s\n' "$body" | sed 's/^/     /'
+    [ -n "$body" ] && hf_linkify "$body" | sed 's/^/     /'; [ -n "$body" ] && echo
     while [ "$rest" != "${rest#*$'\x02'}" ]; do
       rest="${rest#*$'\x02'}"
       local item="${rest%%$'\x02'*}"
       local fname="${item%%$'\t'*}"; local r2="${item#*$'\t'}"; local ftype="${r2%%$'\t'*}"; r2="${r2#*$'\t'}"; local fsize="${r2%%$'\t'*}"; local furl="${r2#*$'\t'}"
       HF_AG_N=$((HF_AG_N + 1)); HF_AG_URLS="$HF_AG_URLS$furl"$'\n'
-      echo -e "     📎 [${HF_AG_N}] ${HF_C_BOLD}${fname}${HF_C_RESET} ${HF_C_DIM}${ftype} · ${fsize} B${HF_C_RESET}"
-      echo -e "         ${HF_C_DIM}${furl}${HF_C_RESET}"
+      if hf_links_supported; then
+        # nombre clicable; la URL no hace falta verla
+        echo -e "     📎 [${HF_AG_N}] ${HF_C_BOLD}$(hf_link "$furl" "$fname")${HF_C_RESET} ${HF_C_DIM}${ftype} · ${fsize} B · $(hf_link "$furl" "$(hf_t "open ↗" "abrir ↗")")${HF_C_RESET}"
+      else
+        echo -e "     📎 [${HF_AG_N}] ${HF_C_BOLD}${fname}${HF_C_RESET} ${HF_C_DIM}${ftype} · ${fsize} B${HF_C_RESET}"
+        echo -e "         ${HF_C_DIM}${furl}${HF_C_RESET}"
+      fi
     done
   done
 }

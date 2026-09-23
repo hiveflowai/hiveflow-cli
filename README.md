@@ -126,7 +126,7 @@ In `/mode safe` every mutating tool asks for confirmation; in `/mode auto` it ac
 | `/agents <name\|id>` | Open an agent's conversation: history with attachments as numbered URLs, talk to it, `/open N` opens attachment N, `/refresh`, `/back` |
 | `/remote control --agent <name>` | Connect **this terminal** as that agent's computer: it can delegate tasks here (files, code, images, web pages) and send files back |
 
-Also from your shell: `hiveflow agents`, `hiveflow agents <name>`. (The swarm's per-agent tool picker lives under `/swarm tool list|choose|set`.)
+Also from your shell: `hiveflow agents`, `hiveflow agents <name>`. Attachment names and URLs are clickable links (OSC 8) in iTerm2, VS Code, WezTerm, Ghostty and Kitty; in macOS Terminal.app the URL is printed on its own line (cmd + double-click opens it). `HF_LINKS=0` forces plain URLs. (The swarm's per-agent tool picker lives under `/swarm tool list|choose|set`.)
 
 ### 💬 Direct API chat (no CLIs, no tools)
 | | |
