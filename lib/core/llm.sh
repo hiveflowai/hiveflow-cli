@@ -14,6 +14,7 @@ hf_llm_setup() {
     echo "  2) claude   (Anthropic, tu propia API key)"
     echo "  3) chatgpt  (OpenAI, tu propia API key)"
     echo "  4) gemini   (Google, tu propia API key)"
+    echo "  5) ollama   (modelos open-source locales vía Ollama, sin API key)"
   else
     echo -e "  ${HF_C_BOLD}LLM provider for /ask and the native agent${HF_C_RESET}"
     echo ""
@@ -21,15 +22,17 @@ hf_llm_setup() {
     echo "  2) claude   (Anthropic, your own API key)"
     echo "  3) chatgpt  (OpenAI, your own API key)"
     echo "  4) gemini   (Google, your own API key)"
+    echo "  5) ollama   (local open-source models via Ollama, no API key)"
   fi
   echo ""
   local choice provider
-  read -r -p "  $(hf_t "Provider [1-4]: " "Proveedor [1-4]: ")" choice
+  read -r -p "  $(hf_t "Provider [1-5]: " "Proveedor [1-5]: ")" choice
   case "$choice" in
     1) provider="hiveflow" ;;
     2) provider="claude"  ;;
     3) provider="chatgpt" ;;
     4) provider="gemini"  ;;
+    5) provider="ollama"  ;;
     *) hf_err "$(hf_t "Invalid option." "Opción inválida.")"; return 1 ;;
   esac
 
@@ -39,12 +42,30 @@ hf_llm_setup() {
       return 1
     fi
     local model
-    read -r -p "  $(hf_t "Model [claude-sonnet-4-5-20250929]: " "Modelo [claude-sonnet-4-5-20250929]: ")" model
-    model="${model:-claude-sonnet-4-5-20250929}"
+    read -r -p "  $(hf_t "Model [claude-sonnet-5]: " "Modelo [claude-sonnet-5]: ")" model
+    model="${model:-claude-sonnet-5}"
     hf_config_set '.llm.provider' "hiveflow"
     hf_config_del '.llm.key'
     hf_config_set '.llm.model' "$model"
     hf_ok "$(hf_t "LLM via Hiveflow account · $model (tokens are billed to your plan)" "LLM vía cuenta Hiveflow · $model (los tokens corren por tu plan)")"
+    return 0
+  fi
+
+  if [ "$provider" = "ollama" ]; then
+    local url model
+    read -r -p "  $(hf_t "Ollama URL [http://127.0.0.1:11434]: " "URL de Ollama [http://127.0.0.1:11434]: ")" url
+    url="${url:-http://127.0.0.1:11434}"
+    read -r -p "  $(hf_t "Model [qwen3:8b] (ollama list): " "Modelo [qwen3:8b] (ollama list): ")" model
+    model="${model:-qwen3:8b}"
+    hf_config_set '.llm.provider' "ollama"
+    hf_config_del '.llm.key'
+    hf_config_set '.llm.url' "$url"
+    hf_config_set '.llm.model' "$model"
+    if curl -s -m 5 "${url%/}/api/tags" | jq -e --arg m "$model" '.models[]? | select(.name==$m or .model==$m)' >/dev/null 2>&1; then
+      hf_ok "$(hf_t "Local LLM via Ollama · $model @ $url" "LLM local vía Ollama · $model @ $url")"
+    else
+      hf_warn "$(hf_t "Saved, but $url does not list '$model' (is Ollama running? ollama pull $model)" "Guardado, pero $url no lista '$model' (¿corre Ollama? ollama pull $model)")"
+    fi
     return 0
   fi
 
@@ -55,7 +76,7 @@ hf_llm_setup() {
   # Modelo: default sensato por proveedor, editable
   local default_model
   case "$provider" in
-    claude)  default_model="claude-sonnet-4-5-20250929" ;;
+    claude)  default_model="claude-sonnet-5" ;;
     chatgpt) default_model="gpt-4o" ;;
     gemini)  default_model="gemini-2.5-pro" ;;
   esac
@@ -75,7 +96,7 @@ hf_ask() {
   local provider key
   provider="$(hf_config_get '.llm.provider')"
   key="$(hf_config_get '.llm.key')"
-  if [ -z "$provider" ] || { [ -z "$key" ] && [ "$provider" != "hiveflow" ]; }; then
+  if [ -z "$provider" ] || { [ -z "$key" ] && [ "$provider" != "hiveflow" ] && [ "$provider" != "ollama" ]; }; then
     hf_warn "$(hf_t "Chat API not configured. Run /llm first." "Chat API sin configurar. Usa /llm primero.")"
     return 1
   fi
@@ -94,7 +115,7 @@ hf_ask() {
       curl -s -m 120 "$HIVEFLOW_API_URL/api/cli/llm/v1/messages" \
         -H "x-api-key: $key" \
         -H "content-type: application/json" \
-        -d "{\"model\":\"${model:-claude-sonnet-4-5-20250929}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
+        -d "{\"model\":\"${model:-claude-sonnet-5}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
         | jq -r --arg u "$unexpected" '.content[0].text // ("ERROR: " + (.error.message // $u))'
       ;;
     claude)
@@ -102,7 +123,7 @@ hf_ask() {
         -H "x-api-key: $key" \
         -H "anthropic-version: 2023-06-01" \
         -H "content-type: application/json" \
-        -d "{\"model\":\"${model:-claude-sonnet-4-5-20250929}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
+        -d "{\"model\":\"${model:-claude-sonnet-5}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
         | jq -r --arg u "$unexpected" '.content[0].text // ("ERROR: " + (.error.message // $u))'
       ;;
     chatgpt)
@@ -111,6 +132,16 @@ hf_ask() {
         -H "Content-Type: application/json" \
         -d "{\"model\":\"${model:-gpt-4o}\",\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
         | jq -r --arg u "$unexpected" '.choices[0].message.content // ("ERROR: " + (.error.message // $u))'
+      ;;
+    ollama)
+      local url
+      url="${HIVEFLOW_LLM_URL:-$(hf_config_get '.llm.url')}"; url="${url:-http://127.0.0.1:11434}"
+      case "$url" in */v1/chat/completions) ;; *) url="${url%/}/v1/chat/completions" ;; esac
+      curl -s -m 300 "$url" \
+        -H "Authorization: Bearer ${key:-ollama}" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\":\"${model:-qwen3:8b}\",\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
+        | jq -r --arg u "$unexpected" '.choices[0].message.content // ("ERROR: " + (.error.message // .error // $u))'
       ;;
     gemini)
       curl -s -m 120 "https://generativelanguage.googleapis.com/v1beta/models/${model:-gemini-2.5-pro}:generateContent?key=$key" \

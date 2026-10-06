@@ -75,7 +75,7 @@ fi
 
 echo
 echo "=== shipped built-in skills present + parseable ==="
-expected_builtins=(analyze refactor review security performance test docs think files focus summary fix)
+expected_builtins=(analyze refactor review security performance test docs think files focus summary fix domotica)
 for skill in "${expected_builtins[@]}"; do
     if [ -f "$CODER_SKILLS_BUILTIN_DIR/$skill.md" ]; then
         _pass "$skill.md present"
@@ -103,7 +103,7 @@ for skill in "${expected_builtins[@]}"; do
 done
 
 echo
-echo "=== skills_list incluye los 12 built-ins (user dir vacio) ==="
+echo "=== skills_list incluye los 13 built-ins (user dir vacio) ==="
 mkdir -p "$CODER_SKILLS_USER_DIR"  # presente pero vacio
 list_out=$(skills_list)
 for skill in "${expected_builtins[@]}"; do
@@ -166,7 +166,7 @@ assert_eq "mycustom path es user dir" "$CODER_SKILLS_USER_DIR/mycustom.md" "$myc
 
 # Total esperado: 12 built-ins (analyze overrideado pero aparece 1x via user) + mycustom.
 total_lines=$(printf '%s\n' "$list_out" | grep -c .)
-assert_eq "skills_list emite 13 entradas (12 builtins + 1 user custom)" "13" "$total_lines"
+assert_eq "skills_list emite 14 entradas (13 builtins + 1 user custom)" "14" "$total_lines"
 
 echo
 echo "=== CODER_SKILLS_BUILTIN_DIR=\"\" desactiva built-in ==="
@@ -215,7 +215,7 @@ mkdir -p "$CODER_SKILLS_USER_DIR"
 
 list_out=$(skills_list)
 total_lines=$(printf '%s\n' "$list_out" | grep -c .)
-assert_eq "12 entradas con solo built-in disponible" "12" "$total_lines"
+assert_eq "13 entradas con solo built-in disponible" "13" "$total_lines"
 
 # analyze ahora resuelve a built-in (no hay user override).
 got_path=$(skills_path analyze)

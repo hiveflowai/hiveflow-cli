@@ -119,14 +119,25 @@ In `/mode safe` every mutating tool asks for confirmation; in `/mode auto` it ac
 
 **Production protections:** ticket content treated as untrusted (anti prompt-injection) · PRs blocked if they touch `.env`/secrets/CI, if the diff is oversized or empty · `.env`+`node_modules` injected into the worktree with no commit risk · timeouts on agents and tests · 1 ticket = 1 PR (idempotent retries) · ticket flood = pause + alert (systemic incident) · GC of zombie worktrees.
 
+### 🤖 Your agent team (the Agents tab, from the terminal)
+| | |
+|---|---|
+| `/agents` | List your agents: state and whether their computer is connected |
+| `/agents <name\|id>` | Open an agent's conversation: history with attachments as numbered URLs, talk to it, `/open N` opens attachment N, `/refresh`, `/back` |
+| `/remote control --agent <name>` | Connect **this terminal** as that agent's computer: it can delegate tasks here (files, code, images, web pages) and send files back |
+
+Also from your shell: `hiveflow agents`, `hiveflow agents <name>`. Attachment names and URLs are clickable links (OSC 8) in iTerm2, VS Code, WezTerm, Ghostty and Kitty; in macOS Terminal.app the URL is printed on its own line (cmd + double-click opens it). `HF_LINKS=0` forces plain URLs. (The swarm's per-agent tool picker lives under `/swarm tool list|choose|set`.)
+
 ### 💬 Direct API chat (no CLIs, no tools)
 | | |
 |---|---|
 | `/llm` | Pick a provider: **hiveflow** (your plan's credits, no API key) or claude/chatgpt/gemini with your key — also configures the native agent |
 | `/ask <question>` | One-off query to the configured provider |
 
-### 👤 Account
+### 👤 Account & environment
 `/status` · `/login` · `/logout` · `/help` · `/exit`
+
+`/env` shows where the CLI points; `/env prod|local|dev|<url|host:port>|reset` switches it (saved in the config; the status line shows `prod · api.hiveflow.ai`, `local · localhost:3001`, `custom · 10.0.0.75:3001`). Each environment keeps its own session: the first time you switch, run `/login` there. `HIVEFLOW_API_URL=…` still wins for a single run, and `HIVEFLOW_CONFIG_DIR=…` gives you a fully separate config.
 
 **Anything that doesn't start with `/` is a code request** — the router infers the task type (es/en) and launches the best installed CLI (or the native agent, if that's what's available or what you pinned).
 

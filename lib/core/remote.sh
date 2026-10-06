@@ -228,15 +228,22 @@ _hf_relay_register() {
     http:*)  local url resp; url="$(hf_remote_relay)"; url="${url#http:}"
              # $2 = conversation_id a reanudar · $3 = "new" fuerza hilo nuevo.
              # La respuesta trae la conversación de Genius que respalda el hilo.
+             # agent_id / request_id: la sesión nace vinculada a un agente (HF_RC_AGENT_ID
+             # lo fija /remote control --agent o el desktop al arrancar por RC_START_REQUEST).
              resp="$(curl -s -m 10 -X POST "${url}/register" \
                -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
                -d "$(jq -nc --arg s "$sid" --arg o "$USER" --arg c "$PWD" --arg h "$HOSTNAME" \
                      --arg conv "${2:-}" --arg th "${HF_REPL_SESSION:-}" \
+                     --arg ag "${HF_RC_AGENT_ID:-}" --arg rq "${HF_RC_REQUEST_ID:-}" \
                      --argjson new "$([ "${3:-}" = "new" ] && echo true || echo false)" \
                      '{session_id:$s, operator:$o, cwd:$c, host:$h}
                       + (if $conv != "" then {conversation_id:$conv} else {} end)
                       + (if $th != "" then {thread_id:$th} else {} end)
+                      + (if $ag != "" then {agent_id:$ag} else {} end)
+                      + (if $rq != "" then {request_id:$rq} else {} end)
                       + (if $new then {new_conversation:true} else {} end)')" 2>/dev/null)"
+             HF_RC_AGENT_NAME="$(printf '%s' "$resp" | jq -r '.agent_name // empty' 2>/dev/null)"
+             HF_RC_AGENT_ERR="$(printf '%s' "$resp" | jq -r '.agent_error // empty' 2>/dev/null)"
              HF_RC_CONVERSATION_ID="$(printf '%s' "$resp" | jq -r '.conversation_id // empty' 2>/dev/null)"
              HF_RC_CONVERSATION_TITLE="$(printf '%s' "$resp" | jq -r '.conversation_title // empty' 2>/dev/null)"
              HF_RC_CONVERSATION_MSGS="$(printf '%s' "$resp" | jq -r '.conversation_messages // 0' 2>/dev/null)"
@@ -246,6 +253,36 @@ _hf_relay_register() {
              HF_RC_REGISTER_ERR="$(printf '%s' "$resp" | jq -r '.message // .error // empty' 2>/dev/null)"
              [ -z "$resp" ] && HF_RC_REGISTER_ERR="$(hf_t "no response from the relay" "el relay no respondió")" ;;
   esac
+}
+
+# Desktop/CLI → nube: cierra la espera de un RC_START_REQUEST que no pudo
+# arrancar (token inválido, backend caído…) para que el cliente deje de esperar.
+_hf_relay_start_ack() {
+  local rid="$1" ok="${2:-false}" err="${3:-}" url
+  [ -z "$rid" ] && return 0
+  case "$(hf_remote_relay)" in
+    http:*) url="$(hf_remote_relay)"; url="${url#http:}"
+            curl -s -m 8 -X POST "${url}/start-ack" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
+              -d "$(jq -nc --arg r "$rid" --arg e "$err" --argjson ok "$([ "$ok" = "true" ] && echo true || echo false)" \
+                    '{requestId:$r, ok:$ok} + (if $e != "" then {error:$e} else {} end)')" >/dev/null 2>&1 ;;
+  esac
+}
+
+# /remote control --agent <nombre|id>: resuelve el agente con GET /api/agents
+# (por id o por nombre sin distinguir mayúsculas) y deja HF_RC_AGENT_ID/_NAME.
+_hf_rc_resolve_agent() {
+  local ref="$1" url api resp hit
+  [ -z "$ref" ] && return 1
+  case "$(hf_remote_relay)" in http:*) url="$(hf_remote_relay)"; url="${url#http:}" ;; *) return 1 ;; esac
+  api="${url%/rc}/agents"
+  resp="$(curl -s -m 15 "$api" -H "Authorization: Bearer $(hf_auth_token)" 2>/dev/null)"
+  hit="$(printf '%s' "$resp" | jq -r --arg ref "$ref" '
+    (.data // []) | map(select((._id == $ref) or (((.name // "") | ascii_downcase) == ($ref | ascii_downcase))))
+    | .[0] // empty | [._id, (.name // "")] | @tsv' 2>/dev/null)"
+  [ -z "$hit" ] && return 1
+  HF_RC_AGENT_ID="${hit%%$'\t'*}"; HF_RC_AGENT_NAME="${hit#*$'\t'}"
+  export HF_RC_AGENT_ID HF_RC_AGENT_NAME
+  return 0
 }
 
 # Latido: renueva last_seen. La web marca "desconectada" si no hay latido reciente.
@@ -284,7 +321,9 @@ _hf_relay_disconnect() {
   esac
 }
 
-# Imprime el siguiente prompt pendiente como  msg_id<TAB>texto  (o nada)
+# Imprime el siguiente prompt pendiente como
+#   msg_id<TAB>origen<TAB>nombre<TAB>texto   (o nada)
+# origen = web | agent (un agente de HiveFlow pidiéndole algo a esta computadora)
 _hf_relay_poll() {
   local sid="$1"
   case "$(hf_remote_relay)" in
@@ -293,7 +332,7 @@ _hf_relay_poll() {
       f="$(ls -1 "$dir/inbox/" 2>/dev/null | head -1)"
       [ -z "$f" ] && return 0
       local mid="${f%.json}"
-      printf '%s\t%s' "$mid" "$(jq -r '.text // empty' "$dir/inbox/$f")"
+      printf '%s\tweb\t\t%s' "$mid" "$(jq -r '.text // empty' "$dir/inbox/$f")"
       rm -f "$dir/inbox/$f" ;;
     http:*)
       local url; url="$(hf_remote_relay)"; url="${url#http:}"
@@ -303,24 +342,30 @@ _hf_relay_poll() {
       # sesión purgada tras un redeploy…) carece de msg_id/text: sin este
       # guard, jq imprimía el string "null" y el daemon lo EJECUTABA en
       # bucle ("🌐 web ❯ null" infinito quemando llamadas al agente).
-      local _mid _text
+      local _mid _text _okind _oname
       _mid="$(printf '%s' "$r" | jq -r '.msg_id // empty' 2>/dev/null)"
       _text="$(printf '%s' "$r" | jq -r '.text // empty' 2>/dev/null)"
       { [ -z "$_mid" ] || [ -z "$_text" ]; } && return 0
-      printf '%s\t%s' "$_mid" "$_text" ;;
+      _okind="$(printf '%s' "$r" | jq -r '.origin.kind // "web"' 2>/dev/null)"
+      _oname="$(printf '%s' "$r" | jq -r '.origin.name // empty' 2>/dev/null | tr -d '\t\n')"
+      [ "$_okind" = "agent" ] || _okind="web"
+      printf '%s\t%s\t%s\t%s' "$_mid" "$_okind" "$_oname" "$_text" ;;
   esac
 }
 
 _hf_relay_respond() {
-  local sid="$1" mid="$2" output="$3"
+  local sid="$1" mid="$2" output="$3" files="${4:-[]}"
+  printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
   case "$(hf_remote_relay)" in
     local:*)
       local dir; dir="$(_hf_relay_local_dir)"
-      jq -nc --arg m "$mid" --arg o "$output" '{msg_id:$m, output:$o, status:"done"}' > "$dir/outbox/$mid.json" ;;
+      jq -nc --arg m "$mid" --arg o "$output" --argjson f "$files" \
+        '{msg_id:$m, output:$o, files:$f, status:"done"}' > "$dir/outbox/$mid.json" ;;
     http:*)
       local url; url="$(hf_remote_relay)"; url="${url#http:}"
-      curl -s -m 15 -X POST "${url}/respond" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
-        -d "$(jq -nc --arg s "$sid" --arg m "$mid" --arg o "$output" '{session_id:$s, msg_id:$m, output:$o}')" >/dev/null 2>&1 ;;
+      curl -s -m 30 -X POST "${url}/respond" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
+        -d "$(jq -nc --arg s "$sid" --arg m "$mid" --arg o "$output" --argjson f "$files" \
+              '{session_id:$s, msg_id:$m, output:$o, files:$f}')" >/dev/null 2>&1 ;;
   esac
 }
 
@@ -349,17 +394,35 @@ hf_remote_control() {
   # Conectar = subir la conversación ACTUAL del REPL: asegúrala primero
   # para que la nube se ate a este hilo (1:1) y no a la terminal.
   declare -f hf_repl_session_ensure >/dev/null 2>&1 && hf_repl_session_ensure >/dev/null 2>&1
-  # $1 opcional: id de conversación de Genius a reanudar, o "new" para hilo nuevo
-  HF_RC_CONVERSATION_ID=""; HF_RC_CONVERSATION_TITLE=""; HF_RC_REGISTERED=""
-  if [ "${1:-}" = "new" ]; then
+  # Args: [<conversation_id>|new] [--agent <nombre|id>]
+  #   --agent: esta computadora queda vinculada a ese agente (sin pasar por la UI)
+  local conv_arg="" agent_ref=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent)   shift; agent_ref="${1:-}" ;;
+      --agent=*) agent_ref="${1#--agent=}" ;;
+      *)         [ -z "$conv_arg" ] && conv_arg="$1" ;;
+    esac
+    [ $# -gt 0 ] && shift
+  done
+  if [ -n "$agent_ref" ]; then
+    if ! _hf_rc_resolve_agent "$agent_ref"; then
+      hf_err "$(hf_t "Agent not found: $agent_ref (check the name in the Agents tab)" "No encontré el agente: $agent_ref (revisa el nombre en la pestaña Agentes)")"
+      return 1
+    fi
+  fi
+  HF_RC_CONVERSATION_ID=""; HF_RC_CONVERSATION_TITLE=""; HF_RC_REGISTERED=""; HF_RC_AGENT_NAME="${HF_RC_AGENT_NAME:-}"; HF_RC_AGENT_ERR=""
+  if [ "$conv_arg" = "new" ]; then
     _hf_relay_register "$sid" "" "new"
   else
-    _hf_relay_register "$sid" "${1:-}"
+    _hf_relay_register "$sid" "$conv_arg"
   fi
   # Registro rechazado (token inválido para ESTE ambiente, backend caído…):
-  # avisar fuerte y no fingir que estamos conectados.
+  # avisar fuerte y no fingir que estamos conectados. Si el desktop nos arrancó
+  # para un agente (HF_RC_REQUEST_ID), cerrar su espera con start-ack ok:false.
   case "$relay" in http:*)
     if [ -z "${HF_RC_REGISTERED:-}" ]; then
+      [ -n "${HF_RC_REQUEST_ID:-}" ] && _hf_relay_start_ack "$HF_RC_REQUEST_ID" false "${HF_RC_REGISTER_ERR:-register_failed}"
       hf_err "$(hf_t "Could not connect to the relay ($(hf_env_tag 2>/dev/null || echo api)): ${HF_RC_REGISTER_ERR:-unknown error}" "No se pudo conectar al relay ($(hf_env_tag 2>/dev/null || echo api)): ${HF_RC_REGISTER_ERR:-error desconocido}")"
       hf_dim "$(hf_t "Your token may belong to ANOTHER environment. Check the statusline tag and run /login against this one." "Tu token puede ser de OTRO ambiente. Mira la etiqueta de la statusline y haz /login contra este.")"
       return 1
@@ -371,6 +434,12 @@ hf_remote_control() {
 
   echo ""
   hf_ok "$(hf_t "Remote Control active — thread ${HF_C_BOLD}🧵 ${HF_REPL_SESSION##*-}${HF_C_RESET}" "Remote Control activo — hilo ${HF_C_BOLD}🧵 ${HF_REPL_SESSION##*-}${HF_C_RESET}")"
+  # Vinculada a un agente: él puede pedirle tareas a esta computadora
+  if [ -n "${HF_RC_AGENT_NAME:-}" ] && [ -z "${HF_RC_AGENT_ERR:-}" ]; then
+    hf_ok "$(hf_t "Connected to agent ${HF_C_BOLD}🤖 ${HF_RC_AGENT_NAME}${HF_C_RESET} — it can now delegate tasks to this computer" "Conectada al agente ${HF_C_BOLD}🤖 ${HF_RC_AGENT_NAME}${HF_C_RESET} — ya puede delegarle tareas a esta computadora")"
+  elif [ -n "${HF_RC_AGENT_ID:-}" ]; then
+    hf_warn "$(hf_t "Could not link this session to the agent (${HF_RC_AGENT_ERR:-unknown})" "No se pudo vincular esta sesión al agente (${HF_RC_AGENT_ERR:-desconocido})")"
+  fi
   case "$relay" in
     local:*) hf_dim "$(hf_t "local relay: $(_hf_relay_local_dir) — the desktop and the (local) web can now send it requests" "relay local: $(_hf_relay_local_dir) — el desktop y la web (local) ya pueden pedirle cosas")" ;;
     http:*)
@@ -436,30 +505,133 @@ _hf_rc_activity() {
   esac
 }
 
+# ─── Adjuntos del espejo ───────────────────────────────────────
+# Lo que la terminal ve, la web lo VE. Sin esto el puente solo mueve texto:
+# la terminal abre/produce una imagen, un PDF o un video y en Genius aparece
+# una descripción, no el archivo. Aquí se sube y viaja con la respuesta.
+HF_RC_MEDIA_EXT='png|jpe?g|gif|webp|avif|svg|heic|pdf|mp4|mov|webm|m4v|mp3|wav|csv|xlsx?|docx?|pptx?|zip|json|md|txt|log'
+HF_RC_UPLOAD_MAX_BYTES="${HF_RC_UPLOAD_MAX_BYTES:-26214400}"   # 25 MB (tope del backend)
+HF_RC_MAX_FILES="${HF_RC_MAX_FILES:-3}"
+
+# Resuelve lo que el CLI mencionó a una ruta real: absoluta, ~, o un nombre
+# suelto ("INE.png") buscado en los sitios obvios.
+_hf_rc_resolve_path() {
+  local p="$1" d
+  p="${p%[,.;:]}"; p="${p%\)}"; p="${p%\"}"; p="${p%\'}"
+  case "$p" in "~"/*) p="$HOME/${p#\~/}" ;; esac
+  case "$p" in
+    /*) [ -f "$p" ] && { printf '%s' "$p"; return 0; }; return 1 ;;
+  esac
+  for d in "$PWD" "$HOME/Desktop" "$HOME/Escritorio" "$HOME/Downloads" "$HOME/Documents" "$HOME"; do
+    [ -f "$d/$p" ] && { printf '%s' "$d/$p"; return 0; }
+  done
+  return 1
+}
+
+# Sube UN archivo y devuelve su objeto JSON ({name,url,type,size}) o nada.
+_hf_rc_upload_one() {
+  local f="$1" sid url size resp
+  [ -f "$f" ] || return 1
+  case "$(hf_remote_relay)" in http:*) url="$(hf_remote_relay)"; url="${url#http:}" ;; *) return 1 ;; esac
+  size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+  if [ "${size:-0}" -gt "$HF_RC_UPLOAD_MAX_BYTES" ]; then
+    hf_warn "$(hf_t "Too big to send ($(( size / 1048576 )) MB): $f" "Muy grande para enviar ($(( size / 1048576 )) MB): $f")" >/dev/tty 2>/dev/null || true
+    return 1
+  fi
+  sid="$(cat "$(_hf_rc_state_dir)/session" 2>/dev/null)"
+  resp="$(curl -s -m 180 -X POST "${url}/upload" \
+    -H "Authorization: Bearer $(hf_auth_token)" \
+    -F "session_id=${sid}" -F "file=@${f}" 2>/dev/null)"
+  printf '%s' "$resp" | jq -c 'select(.ok == true) | .file' 2>/dev/null
+}
+
+# Junta los archivos de un turno y los sube. Fuentes, en orden:
+#   1. marcador explícito  HF_SEND: /ruta/absoluta   (lo imprime el CLI)
+#   2. rutas o nombres de archivo de medios que aparecen en la salida
+# Devuelve un array JSON (vacío si no hay nada que mandar).
+_hf_rc_collect_files() {
+  local out="$1" cand resolved n=0 json="[]" item
+  local seen=" "
+  while IFS= read -r cand; do
+    [ -z "$cand" ] && continue
+    [ "$n" -ge "$HF_RC_MAX_FILES" ] && break
+    resolved="$(_hf_rc_resolve_path "$cand")" || continue
+    case "$seen" in *" $resolved "*) continue ;; esac
+    seen="$seen$resolved "
+    item="$(_hf_rc_upload_one "$resolved")" || continue
+    [ -z "$item" ] && continue
+    json="$(printf '%s' "$json" | jq -c --argjson f "$item" '. + [$f]' 2>/dev/null || printf '%s' "$json")"
+    n=$((n + 1))
+  done < <(
+    # 1. marcador explícito: la línea entera es la ruta (admite espacios)
+    printf '%s\n' "$out" | sed -n 's/^[[:space:]]*HF_SEND:[[:space:]]*//p'
+    # 2. rutas entrecomilladas (así viajan los nombres con espacios)
+    printf '%s\n' "$out" | grep -oE "[\"'\`][^\"'\`]+\.($HF_RC_MEDIA_EXT)[\"'\`]" 2>/dev/null | sed -e 's/^.//' -e 's/.$//'
+    # 3. rutas o nombres sueltos SIN espacios
+    printf '%s\n' "$out" | grep -oE "[~/]?[A-Za-z0-9._/-]+\.($HF_RC_MEDIA_EXT)" 2>/dev/null
+  )
+  printf '%s' "$json"
+}
+
+# Con el espejo activo, el CLI que atiende a la web necesita saber que PUEDE
+# mandar archivos: se le pide que imprima el marcador en vez de describirlos.
+# $2 = origen (web|agent), $3 = nombre del agente: cuando quien pregunta es un
+# agente autónomo, la instrucción pide resultados y archivos, no conversación.
+_hf_rc_prompt_with_files() {
+  if [ "${2:-web}" = "agent" ]; then
+    local who="${3:-agent}"
+    printf '%s\n\n%s' "$1" "$(hf_t \
+"[Hiveflow Remote Control] You are answering the HiveFlow agent \"$who\", an autonomous agent — NOT a person. It delegated this task to this computer and will read your output as a tool result. Do the task, then return RESULTS: what you did, findings, paths, errors — concise and factual, no greetings or questions. If a file is part of the result (image, video, PDF, document, report), print at the end one line per file, exactly: HF_SEND: /absolute/path. The bridge uploads it and hands it to the agent. Never claim a file was delivered without that line." \
+"[Hiveflow Remote Control] Le respondes al agente de HiveFlow \"$who\", un agente autónomo — NO una persona. Te delegó esta tarea y leerá tu salida como el resultado de una herramienta. Haz la tarea y devuelve RESULTADOS: qué hiciste, hallazgos, rutas, errores — conciso y factual, sin saludos ni preguntas. Si un archivo forma parte del resultado (imagen, video, PDF, documento, reporte), imprime al final una línea por archivo, exactamente así: HF_SEND: /ruta/absoluta. El puente lo sube y se lo entrega al agente. Nunca digas que entregaste un archivo sin esa línea.")"
+    return 0
+  fi
+  printf '%s\n\n%s' "$1" "$(hf_t \
+"[Hiveflow Remote Control] You are answering someone who is NOT at this terminal: they read you in a web chat and cannot see this screen. If the answer involves a file (image, video, PDF, document) — because they asked to see it, or you produced it — print at the end one line per file, exactly: HF_SEND: /absolute/path. The bridge uploads it and shows it in the chat. Never claim a file was shown without that line." \
+"[Hiveflow Remote Control] Le respondes a alguien que NO está en esta terminal: te lee en un chat web y no ve esta pantalla. Si la respuesta involucra un archivo (imagen, video, PDF, documento) — porque pidió verlo, o porque lo generaste — imprime al final una línea por archivo, exactamente así: HF_SEND: /ruta/absoluta. El puente lo sube y lo muestra en el chat. Nunca digas que mostraste un archivo sin esa línea.")"
+}
+
+# /send <ruta> — mandar un archivo a la conversación de Genius a mano.
+hf_rc_send() {
+  local arg="$1" f item
+  if [ -z "$arg" ]; then
+    hf_err "$(hf_t "Usage: /send <path>  (image, video, PDF, document)" "Uso: /send <ruta>  (imagen, video, PDF, documento)")"; return 1
+  fi
+  if ! hf_rc_mirror_active 2>/dev/null; then
+    hf_err "$(hf_t "Remote Control is not mirroring. Connect it with /remote control" "Remote Control no está reflejando. Conéctalo con /remote control")"; return 1
+  fi
+  f="$(_hf_rc_resolve_path "$arg")" || { hf_err "$(hf_t "File not found: $arg" "Archivo no encontrado: $arg")"; return 1; }
+  hf_info "$(hf_t "Sending $(basename "$f") ..." "Enviando $(basename "$f") ...")"
+  item="$(_hf_rc_upload_one "$f")"
+  [ -z "$item" ] && { hf_err "$(hf_t "Could not upload the file" "No se pudo subir el archivo")"; return 1; }
+  _hf_rc_append assistant "$(basename "$f")" "[$item]"
+  hf_ok "$(hf_t "Sent — it now shows in the Genius conversation" "Enviado — ya se ve en la conversación de Genius")"
+}
+
 # Añade un mensaje a la conversación de Genius del espejo (best-effort).
 # Si la web la borró, el backend la recrea vacía y responde recreated=true:
 # resubimos TODO el historial local — la terminal es la fuente de verdad.
 _hf_rc_append() {
-  local role="$1" content="$2" sid url resp
+  local role="$1" content="$2" files="${3:-[]}" sid url resp
   hf_rc_mirror_active || return 0
   sid="$(cat "$(_hf_rc_state_dir)/session" 2>/dev/null)"
   [ -z "$sid" ] && return 0
+  printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
   case "$(hf_remote_relay)" in
     http:*)
       url="$(hf_remote_relay)"; url="${url#http:}"
       content="$(printf '%s' "$content" | sed -e $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' -e $'s/\r//g')"
-      resp="$(curl -s -m 10 -X POST "${url}/append" \
+      resp="$(curl -s -m 30 -X POST "${url}/append" \
         -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
-        -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" \
-              '{session_id:$s, role:$r, content:$c}')" 2>/dev/null)"
+        -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" --argjson f "$files" \
+              '{session_id:$s, role:$r, content:$c, files:$f}')" 2>/dev/null)"
       if [ "$(printf '%s' "$resp" | jq -r '.recreated // false' 2>/dev/null)" = "true" ]; then
         # Primero la historia completa, luego el mensaje que disparó el
         # renacer (el backend no lo añadió para preservar el orden).
         _hf_rc_backfill "$sid"
-        curl -s -m 10 -X POST "${url}/append" \
+        curl -s -m 30 -X POST "${url}/append" \
           -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
-          -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" \
-                '{session_id:$s, role:$r, content:$c}')" >/dev/null 2>&1
+          -d "$(jq -nc --arg s "$sid" --arg r "$role" --arg c "$content" --argjson f "$files" \
+                '{session_id:$s, role:$r, content:$c, files:$f}')" >/dev/null 2>&1
       fi ;;
   esac
 }
@@ -532,8 +704,16 @@ _hf_rc_daemon() {
     [ $((beats % 5)) -eq 1 ] && _hf_relay_heartbeat "$sid"
     local pending; pending="$(_hf_relay_poll "$sid")"
     if [ -n "$pending" ]; then
-      mid="${pending%%$'\t'*}"; text="${pending#*$'\t'}"
-      { printf '\n  \033[38;5;51m🌐 web ❯\033[0m %s\n' "$text"; } > /dev/tty 2>/dev/null || true
+      # msg_id<TAB>origen<TAB>nombre<TAB>texto
+      local okind oname rest
+      mid="${pending%%$'\t'*}"; rest="${pending#*$'\t'}"
+      okind="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+      oname="${rest%%$'\t'*}"; text="${rest#*$'\t'}"
+      if [ "$okind" = "agent" ]; then
+        { printf '\n  \033[38;5;213m🤖 %s ❯\033[0m %s\n' "${oname:-agent}" "$(hf_linkify "$text")"; } > /dev/tty 2>/dev/null || true
+      else
+        { printf '\n  \033[38;5;51m🌐 web ❯\033[0m %s\n' "$(hf_linkify "$text")"; } > /dev/tty 2>/dev/null || true
+      fi
       # MISMA ejecución que el REPL, pero con salida PROGRESIVA: cada línea
       # nueva se manda a la web (/progress) y se pinta en la terminal en vivo.
       local outf runpid sent total new out
@@ -541,7 +721,9 @@ _hf_rc_daemon() {
       if [[ "$text" == /* ]]; then
         ( hf_handle_slash "$text" ) > "$outf" 2>&1 &
       else
-        ( HIVEFLOW_NO_SPINNER=1 hf_run_request "$text" ) > "$outf" 2>&1 &
+        # El prompt lleva la instrucción del marcador: quien pregunta está en
+        # la web y necesita el ARCHIVO, no su descripción.
+        ( HIVEFLOW_NO_SPINNER=1 hf_run_request "$(_hf_rc_prompt_with_files "$text" "$okind" "$oname")" ) > "$outf" 2>&1 &
       fi
       runpid=$!
       sent=0
@@ -565,7 +747,15 @@ _hf_rc_daemon() {
       # La web guarda texto plano: fuera códigos ANSI y retornos de carro
       out="$(sed -e $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' -e $'s/\r//g' "$outf")"
       rm -f "$outf"
-      _hf_relay_respond "$sid" "$mid" "$out"
+      # Adjuntos del turno: se suben y viajan con la respuesta; el marcador
+      # HF_SEND: es plomería, no se le muestra a quien lee en la web.
+      local rc_files
+      rc_files="$(_hf_rc_collect_files "$out")"
+      if [ "$rc_files" != "[]" ]; then
+        out="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*HF_SEND:' || printf '%s' "$out")"
+        { printf '  \033[38;5;51m📎\033[0m %s\n' "$(hf_t "sent $(printf '%s' "$rc_files" | jq -r 'length') file(s) to the web" "enviado(s) $(printf '%s' "$rc_files" | jq -r 'length') archivo(s) a la web")"; } > /dev/tty 2>/dev/null || true
+      fi
+      _hf_relay_respond "$sid" "$mid" "$out" "$rc_files"
       # Confirmar y devolver el prompt para que el usuario sepa que puede escribir
       { printf '  \033[32m✓\033[0m %s\n\n%s' "$(hf_t "answered to the web" "respondido a la web")" "$(hf_prompt_label)"; } > /dev/tty 2>/dev/null || true
       hf_metric rc_message "" session="$sid"
@@ -614,7 +804,7 @@ hf_remote_cmd() {
               jq --arg r "$1" '.remote.relay=$r' "$HF_CONFIG_FILE" > "$tmp" && mv "$tmp" "$HF_CONFIG_FILE"
               hf_ok "Relay: $1"
             fi ;;
-    control|serve) shift; hf_remote_control "${1:-}" ;;
+    control|serve) shift; hf_remote_control "$@" ;;
     stop)   hf_rc_stop ;;
     run)    shift; hf_remote_run "$@" ;;
     status) hf_remote_status ;;
@@ -627,6 +817,7 @@ hf_remote_cmd() {
         echo -e "  ${HF_C_BOLD}Remote Control${HF_C_RESET} (pedirle cualquier cosa al CLI desde web/app):"
         echo "    /remote relay <local:dir|http:url>  Dónde se refleja la sesión"
         echo "    /remote control                     Reflejar ESTA sesión y escuchar"
+        echo "    /remote control --agent <nombre|id> Además, vincularla a un agente (usa esta computadora)"
         echo ""
         echo -e "  ${HF_C_BOLD}Nodos${HF_C_RESET} (correr tickets en otra máquina):"
         echo "    /remote add <nombre> [local|user@host]  Registrar un nodo"
@@ -642,6 +833,7 @@ hf_remote_cmd() {
         echo -e "  ${HF_C_BOLD}Remote Control${HF_C_RESET} (ask the CLI anything from web/app):"
         echo "    /remote relay <local:dir|http:url>  Where the session is mirrored"
         echo "    /remote control                     Mirror THIS session and listen"
+        echo "    /remote control --agent <name|id>   Also link it to an agent (it can use this computer)"
         echo ""
         echo -e "  ${HF_C_BOLD}Nodes${HF_C_RESET} (run tickets on another machine):"
         echo "    /remote add <name> [local|user@host]  Register a node"

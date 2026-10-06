@@ -114,7 +114,7 @@ hf_help_topic_en() {
         echo -e "  ${HF_C_BOLD}Swarm and autonomous development${HF_C_RESET}"
         echo "    /swarm              Status (or /swarm help for full detail)"
         echo "    /swarm wizard       Assistant to set up the device swarm"
-        echo "    /agents             Which CLI each agent uses: list · choose · set"
+        echo "    /swarm tool         Which CLI each swarm agent uses: list · choose · set"
         echo "    /dashboard          Live dashboard"
         echo "    /prd                Generate a feature PRD"
         echo "    /ralph              Autonomous loops over a PRD"
@@ -281,7 +281,7 @@ hf_help_topic_es() {
         echo -e "  ${HF_C_BOLD}Swarm y desarrollo autónomo${HF_C_RESET}"
         echo "    /swarm              Estado (o /swarm help para todo el detalle)"
         echo "    /swarm wizard       Asistente para montar el swarm de devices"
-        echo "    /agents             Qué CLI usa cada agente: list · choose · set"
+        echo "    /swarm tool         Qué CLI usa cada agente del swarm: list · choose · set"
         echo "    /dashboard          Dashboard en vivo"
         echo "    /prd                Generar un PRD de feature"
         echo "    /ralph              Loops autónomos sobre un PRD"
@@ -386,7 +386,7 @@ hf_help_en() {
     echo -e "  ${HF_C_BOLD}🐝 Distributed swarm${HF_C_RESET} ${HF_C_DIM}(agents across devices)${HF_C_RESET}"
     echo "  /swarm              Swarm status (or /swarm help: full detail)"
     echo "  /swarm wizard       Guided assistant to set up the swarm"
-    echo "  /agents             Tools per agent: list · choose <proj> <agent> · set"
+    echo "  /swarm tool         Tools per swarm agent: list · choose <proj> <agent> · set"
     echo "  /dashboard          Live swarm dashboard"
     echo ""
     echo -e "  ${HF_C_BOLD}🤖 Autonomous development${HF_C_RESET}"
@@ -462,7 +462,7 @@ hf_help_es() {
     echo -e "  ${HF_C_BOLD}🐝 Swarm distribuido${HF_C_RESET} ${HF_C_DIM}(agentes en varios devices)${HF_C_RESET}"
     echo "  /swarm              Estado del swarm (o /swarm help: todo el detalle)"
     echo "  /swarm wizard       Asistente guiado para montar el swarm"
-    echo "  /agents             Tools por agente: list · choose <proy> <agente> · set"
+    echo "  /swarm tool         Tools por agente del swarm: list · choose <proy> <agente> · set"
     echo "  /dashboard          Dashboard del swarm en vivo"
     echo ""
     echo -e "  ${HF_C_BOLD}🤖 Desarrollo autónomo${HF_C_RESET}"
@@ -603,7 +603,7 @@ hf_status_line() {
   model="$(hf_config_get '.llm.model')"
   if [ -n "$provider" ] && [ -z "$model" ]; then
     case "$provider" in
-      claude|hiveflow) model="claude-sonnet-4-5-20250929" ;;
+      claude|hiveflow) model="claude-sonnet-5" ;;
       chatgpt)         model="gpt-4o" ;;
       gemini)          model="gemini-2.5-pro" ;;
     esac
@@ -812,6 +812,7 @@ hf_palette() {
     "/tickets|$(hf_t "Support tickets → PR pipeline" "Tickets de soporte → pipeline a PR")"
     "/fix|$(hf_t "Resolve a ticket end to end" "Resolver un ticket de principio a fin")"
     "/remote|$(hf_t "Remote Control: mirror this CLI in the web/app" "Remote Control: reflejar este CLI en la web/app")"
+    "/send|$(hf_t "Send a file (image/video/PDF) to the web conversation" "Enviar un archivo (imagen/video/PDF) a la conversación web")"
     "/review|$(hf_t "Agent reviews human-opened PRs" "El agente revisa PRs abiertos por humanos")"
     "/deploy|$(hf_t "Health checks of your endpoints" "Salud de tus endpoints")"
     "/intake|$(hf_t "Feed tickets from alerts/debt/audit" "Alimentar tickets desde alertas/deuda/audit")"
@@ -820,7 +821,7 @@ hf_palette() {
     "/loop|$(hf_t "Agentic loop stats and traces" "Stats y trazas de loops agénticos")"
     "/health|$(hf_t "Check the AI CLIs respond" "Comprobar que los AI CLIs responden")"
     "/swarm|$(hf_t "Distributed agents across devices" "Agentes distribuidos en devices")"
-    "/agents|$(hf_t "Tool per swarm agent" "Tool por agente del swarm")"
+    "/agents|$(hf_t "Your agent team: list · open a conversation" "Tu equipo de agentes: lista · abre una conversación")"
     "/dashboard|$(hf_t "Live swarm dashboard" "Dashboard del swarm en vivo")"
     "/prd|$(hf_t "Generate a feature PRD" "Generar un PRD de feature")"
     "/ralph|$(hf_t "Autonomous loops over a PRD" "Loops autónomos sobre un PRD")"
@@ -1260,6 +1261,43 @@ user: $prompt"
   return $rc
 }
 
+HF_SHELL_WORDS=()
+hf_split_shell_words() {
+  local input="$1" token="" quote="" escaped=0 active=0 char i
+  HF_SHELL_WORDS=()
+  for ((i = 0; i < ${#input}; i++)); do
+    char="${input:i:1}"
+    if [ "$escaped" -eq 1 ]; then
+      token+="$char"
+      active=1
+      escaped=0
+      continue
+    fi
+    if [ "$quote" = "'" ]; then
+      if [ "$char" = "'" ]; then quote=""; else token+="$char"; active=1; fi
+      continue
+    fi
+    if [ "$char" = "\\" ]; then escaped=1; active=1; continue; fi
+    if [ -n "$quote" ]; then
+      if [ "$char" = "$quote" ]; then quote=""; else token+="$char"; active=1; fi
+      continue
+    fi
+    case "$char" in
+      "'"|"\"") quote="$char"; active=1 ;;
+      [[:space:]])
+        if [ "$active" -eq 1 ]; then
+          HF_SHELL_WORDS+=("$token")
+          token=""
+          active=0
+        fi
+        ;;
+      *) token+="$char"; active=1 ;;
+    esac
+  done
+  if [ -n "$quote" ] || [ "$escaped" -eq 1 ]; then return 1; fi
+  [ "$active" -eq 0 ] || HF_SHELL_WORDS+=("$token")
+}
+
 hf_handle_slash() {
   local line="$1"
   local cmd args
@@ -1311,9 +1349,17 @@ hf_handle_slash() {
       fi ;;
     /health)        hf_tools_health ;;
     /status)        hf_status ;;
+    # ── Equipo de agentes (web/desktop/móvil) ──
+    /agents)        hf_agents_cmd $args ;;
     # ── Swarm engine (vendored from asis-coder) ──
-    /swarm)         hf_engine_dispatch ${args:-status} ;;
-    /agents)        hf_engine_dispatch tool ${args:-list} ;;
+    /swarm)
+      if [ -z "$args" ]; then
+        hf_engine_dispatch status
+      elif hf_split_shell_words "$args"; then
+        hf_engine_dispatch "${HF_SHELL_WORDS[@]}"
+      else
+        hf_err "$(hf_t "Unclosed quote or escape in /swarm command." "Comilla o escape sin cerrar en el comando /swarm.")"
+      fi ;;
     /dashboard)     hf_engine_dispatch dashboard $args ;;
     /prd)           hf_engine_dispatch prd $args ;;
     /ralph)         hf_engine_dispatch ralph ${args:-help} ;;
@@ -1346,6 +1392,7 @@ hf_handle_slash() {
     /routing)       hf_adaptive_report ;;
     /loop)          hf_loop_cmd $args ;;
     /remote)        hf_remote_cmd $args ;;
+    /send|/file)    hf_rc_send "$args" ;;
     # ── Native agent (own agentic engine) ──
     /agent)
       if [ -n "$args" ]; then
@@ -1393,6 +1440,7 @@ hf_handle_slash() {
       else
         hf_ask "$args"
       fi ;;
+    /env)           hf_env_cmd $args ;;
     /login)         hf_login ;;
     /logout)        hf_logout ;;
     /update)        hf_update_cmd $args ;;
