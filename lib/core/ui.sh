@@ -106,3 +106,31 @@ hf_pick() {
   printf '\r\033[%dA\033[J\033[?25h' $((rows - 1))
   [ -n "$HF_PICK_CHOICE" ]
 }
+
+# ── Enlaces clicables (OSC 8) ────────────────────────────────────────────────
+# iTerm2, VS Code, WezTerm, Ghostty, Kitty y Hyper entienden OSC 8: el texto
+# queda como enlace. Terminal.app de macOS no: ahí se imprime la URL tal cual
+# (se abre con cmd + doble clic). HF_LINKS=0 fuerza el modo sin enlaces.
+hf_links_supported() {
+  [ "${HF_LINKS:-}" = "0" ] && return 1
+  [ "${HF_LINKS:-}" = "1" ] && return 0
+  case "${TERM_PROGRAM:-}" in iTerm.app|vscode|WezTerm|ghostty|Hyper) return 0 ;; esac
+  [ -n "${KITTY_WINDOW_ID:-}" ] && return 0
+  [ -n "${WT_SESSION:-}" ] && return 0
+  return 1
+}
+
+# hf_link <url> [texto]  → texto clicable (o la URL si no hay soporte)
+hf_link() {
+  local url="$1" text="${2:-$1}"
+  if hf_links_supported; then printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$url" "$text"; else printf '%s' "$url"; fi
+}
+
+# hf_linkify <texto> → cada http(s)://… del texto se vuelve clicable (si hay soporte)
+hf_linkify() {
+  if hf_links_supported; then
+    printf '%s' "$1" | sed -E $'s#(https?://[^ \t<>"\')\\]]+)#\033]8;;\\1\033\\\\\\1\033]8;;\033\\\\#g'
+  else
+    printf '%s' "$1"
+  fi
+}

@@ -186,9 +186,36 @@ assert_eq "HIVEFLOW_LLM_KEY gana sin sesión" "hf_ci_key" "${ANTHROPIC_API_KEY:-
 unset HIVEFLOW_LLM_KEY ANTHROPIC_MESSAGES_URL ANTHROPIC_API_KEY CODER_CLAUDE_MODEL llm_choice
 
 # =====================================================
+echo "=== provider ollama: modelos locales sin API key ==="
+hf_config_get() {
+    case "$1" in
+        '.llm.provider') echo "ollama" ;;
+        '.llm.url')      echo "http://zion:11434" ;;
+        '.llm.model')    echo "qwen3:14b" ;;
+        *) echo "" ;;
+    esac
+}
+unset HIVEFLOW_LLM_URL OPENAI_API_KEY OPENAI_CHAT_COMPLETIONS_URL CODER_OPENAI_MODEL llm_choice
+hf_agent_env
+rc=$?
+assert_eq "hf_agent_env ollama -> 0" "0" "$rc"
+assert_eq "llm_choice mapea a chatgpt (adapter OpenAI-compatible)" "chatgpt" "${llm_choice:-}"
+assert_eq "URL = base + /v1/chat/completions" "http://zion:11434/v1/chat/completions" "${OPENAI_CHAT_COMPLETIONS_URL:-}"
+assert_eq "key placeholder 'ollama'" "ollama" "${OPENAI_API_KEY:-}"
+assert_eq "modelo del config" "qwen3:14b" "${CODER_OPENAI_MODEL:-}"
+if hf_agent_available; then pass "hf_agent_available ollama sin key"; else fail "hf_agent_available ollama sin key"; fi
+export HIVEFLOW_LLM_URL="http://127.0.0.1:11434/v1/chat/completions"
+hf_agent_env
+assert_eq "HIVEFLOW_LLM_URL gana y no duplica el path" "http://127.0.0.1:11434/v1/chat/completions" "${OPENAI_CHAT_COMPLETIONS_URL:-}"
+unset HIVEFLOW_LLM_URL OPENAI_API_KEY OPENAI_CHAT_COMPLETIONS_URL CODER_OPENAI_MODEL llm_choice
+
+# =====================================================
 echo "=== device flow del login (curl mockeado) ==="
 
 eval "$(sed -n '/^hf_auth_device_flow()/,/^}/p' "$REPO_ROOT/lib/core/auth.sh")"
+# El token se guarda por entorno (hf_auth_save_token → .auth.tokens[host] y .auth.token)
+eval "$(grep '^hf_api_host()' "$REPO_ROOT/lib/core/auth.sh")"
+eval "$(sed -n '/^hf_auth_save_token()/,/^}/p' "$REPO_ROOT/lib/core/auth.sh")"
 HF_C_BOLD=""; HF_C_RESET=""
 hf_ok() { :; }; hf_info() { :; }; hf_dim() { :; }; hf_warn() { :; }
 _DEV_STATE=$(mktemp -d)

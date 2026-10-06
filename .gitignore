@@ -4,3 +4,8 @@ node_modules/
 # proprietary — never commit to the public repo
 lib/engine/
 assets/ralph.sh
+.claude/
+
+# local secrets — never commit
+secrets.env
+**/secrets.env

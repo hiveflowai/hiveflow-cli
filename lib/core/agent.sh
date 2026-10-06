@@ -135,13 +135,31 @@ hf_agent_env() {
     export ANTHROPIC_API_KEY="$key"
     export ANTHROPIC_MESSAGES_URL="${HIVEFLOW_API_URL%/}/api/cli/llm/v1/messages"
     HF_AGENT_ENV_EXPORTED="ANTHROPIC_API_KEY ANTHROPIC_MESSAGES_URL HIVEFLOW_API_TOKEN"
-    export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-claude-sonnet-4-5-20250929}}"
+    export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-claude-sonnet-5}}"
+    hf_agent_project_context
+    return 0
+  fi
+
+  # "ollama" provider: local / open-source models through Ollama's
+  # OpenAI-compatible endpoint (qwen, deepseek, llama, gemma...). No API key:
+  # the URL comes from HIVEFLOW_LLM_URL, .llm.url or the local default, and
+  # the chatgpt adapter (tool calling included) is reused as-is.
+  if [ "$provider" = "ollama" ]; then
+    local url
+    url="${HIVEFLOW_LLM_URL:-$(hf_config_get '.llm.url')}"
+    url="${url:-http://127.0.0.1:11434}"
+    case "$url" in */v1/chat/completions) ;; *) url="${url%/}/v1/chat/completions" ;; esac
+    llm_choice="chatgpt"
+    export OPENAI_API_KEY="${key:-ollama}"
+    export OPENAI_CHAT_COMPLETIONS_URL="$url"
+    HF_AGENT_ENV_EXPORTED="OPENAI_API_KEY OPENAI_CHAT_COMPLETIONS_URL HIVEFLOW_API_TOKEN"
+    export CODER_OPENAI_MODEL="${model:-${CODER_OPENAI_MODEL:-qwen3:8b}}"
     hf_agent_project_context
     return 0
   fi
 
   if [ -z "$provider" ] || [ -z "$key" ]; then
-    hf_err "$(hf_t "The native agent needs a provider + API key. Run /llm (or export HIVEFLOW_LLM_PROVIDER and HIVEFLOW_LLM_KEY)." "El agente nativo necesita proveedor + API key. Usa /llm (o exporta HIVEFLOW_LLM_PROVIDER y HIVEFLOW_LLM_KEY).")"
+    hf_err "$(hf_t "The native agent needs a provider + API key. Run /llm (or export HIVEFLOW_LLM_PROVIDER and HIVEFLOW_LLM_KEY; ollama needs no key)." "El agente nativo necesita proveedor + API key. Usa /llm (o exporta HIVEFLOW_LLM_PROVIDER y HIVEFLOW_LLM_KEY; ollama no necesita key).")"
     return 1
   fi
 
@@ -150,7 +168,7 @@ hf_agent_env() {
     claude)
       export ANTHROPIC_API_KEY="$key"
       HF_AGENT_ENV_EXPORTED="ANTHROPIC_API_KEY HIVEFLOW_API_TOKEN"
-      export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-claude-sonnet-4-5-20250929}}"
+      export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-claude-sonnet-5}}"
       ;;
     chatgpt)
       export OPENAI_API_KEY="$key"
@@ -163,7 +181,7 @@ hf_agent_env() {
       export CODER_GEMINI_MODEL="${model:-${CODER_GEMINI_MODEL:-gemini-2.5-pro}}"
       ;;
     *)
-      hf_err "$(hf_t "Provider not supported by the agent: $provider (claude|chatgpt|gemini)" "Proveedor no soportado por el agente: $provider (claude|chatgpt|gemini)")"
+      hf_err "$(hf_t "Provider not supported by the agent: $provider (hiveflow|claude|chatgpt|gemini|ollama)" "Proveedor no soportado por el agente: $provider (hiveflow|claude|chatgpt|gemini|ollama)")"
       return 1
       ;;
   esac
@@ -332,6 +350,8 @@ hf_agent_available() {
   local provider key
   provider="${HIVEFLOW_LLM_PROVIDER:-$(hf_config_get '.llm.provider')}"
   [ -z "$provider" ] && return 1
+  # ollama: local models, no key needed
+  [ "$provider" = "ollama" ] && return 0
   if [ "$provider" = "hiveflow" ]; then
     key="${HIVEFLOW_LLM_KEY:-$(hf_auth_token)}"
   else

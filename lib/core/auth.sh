@@ -8,9 +8,58 @@
 # is not deployed, remote validation is skipped with a warning and the
 # token is stored locally (offline mode).
 
+# Entorno del CLI: HIVEFLOW_API_URL (por invocación) > .api.url del config
+# (/env) > producción. La statusline lo muestra (hf_env_tag).
+if [ -n "${HIVEFLOW_API_URL:-}" ]; then HIVEFLOW_API_URL_FROM_ENV=1; else HIVEFLOW_API_URL="$(hf_config_get '.api.url' 2>/dev/null)"; fi
 HIVEFLOW_API_URL="${HIVEFLOW_API_URL:-https://api.hiveflow.ai}"
 
-hf_auth_token()  { hf_config_get '.auth.token'; }
+# host[:puerto] del API actual: clave de los tokens por entorno
+hf_api_host() { local h="${HIVEFLOW_API_URL#*://}"; printf '%s' "${h%%/*}"; }
+
+# Token por entorno (.auth.tokens["host"]); si no hay, el clásico .auth.token
+# (compatible con el desktop, que escribe ese para producción).
+hf_auth_token() {
+  local t; t="$(hf_config_get ".auth.tokens[\"$(hf_api_host)\"]")"
+  [ -n "$t" ] && { printf '%s' "$t"; return; }
+  hf_config_get '.auth.token'
+}
+# Guarda el token para el entorno actual (y el clásico, para compatibilidad)
+hf_auth_save_token() {
+  hf_config_set ".auth.tokens[\"$(hf_api_host)\"]" "$1"
+  hf_config_set '.auth.token' "$1"
+}
+
+# /env — ver o cambiar el entorno del CLI
+#   /env                    entorno actual y atajos
+#   /env prod|local|dev     atajos: api.hiveflow.ai · localhost:3001 · local3001.hiveflow.ai
+#   /env <url|host[:puerto]> p. ej. /env 10.0.0.75:3001 (sin esquema → http://)
+#   /env reset              vuelve a producción
+hf_env_cmd() {
+  local ref="${1:-}" url
+  case "$ref" in
+    "")
+      local src; if [ -n "$(hf_config_get '.api.url')" ]; then src="config (/env)"; else src="$(hf_t "default" "por defecto")"; fi
+      [ -n "${HIVEFLOW_API_URL_FROM_ENV:-}" ] && src="HIVEFLOW_API_URL"
+      echo -e "  $(hf_t "Environment" "Entorno"): ${HF_C_BOLD}$(hf_env_tag)${HF_C_RESET}  ${HF_C_DIM}($src)${HF_C_RESET}"
+      if [ -n "$(hf_auth_token)" ]; then hf_dim "$(hf_t "session: yes" "sesión: sí")$( [ -n "$(hf_auth_email)" ] && printf ' · %s' "$(hf_auth_email)")"; else hf_dim "$(hf_t "no session here — run /login" "sin sesión aquí — haz /login")"; fi
+      echo ""
+      hf_dim "/env prod · /env local · /env dev · /env <url|host:puerto> · /env reset"
+      return 0 ;;
+    reset|prod|production) [ "$ref" = "reset" ] && hf_config_del '.api.url' || hf_config_set '.api.url' 'https://api.hiveflow.ai'; url="https://api.hiveflow.ai" ;;
+    local)  url="http://localhost:3001" ;;
+    dev|develop|staging) url="https://local3001.hiveflow.ai" ;;
+    *)
+      url="$ref"
+      case "$url" in http://*|https://*) ;; localhost*|127.*|10.*|192.168.*|172.*|*.local*) url="http://$url" ;; *) url="https://$url" ;; esac
+      url="${url%/}" ;;
+  esac
+  [ "$ref" != "reset" ] && [ "$ref" != "prod" ] && [ "$ref" != "production" ] && hf_config_set '.api.url' "$url"
+  HIVEFLOW_API_URL="$url"; export HIVEFLOW_API_URL
+  hf_ok "$(hf_t "Environment" "Entorno"): ${HF_C_BOLD}$(hf_env_tag)${HF_C_RESET}"
+  if [ -z "$(hf_auth_token)" ]; then
+    hf_dim "$(hf_t "no session for this environment yet: run /login (the other environments keep theirs)" "aún sin sesión en este entorno: haz /login (los demás conservan la suya)")"
+  fi
+}
 hf_auth_method() { hf_config_get '.auth.method'; }
 hf_auth_email()  { hf_config_get '.auth.email'; }
 
@@ -71,7 +120,7 @@ hf_login() {
         hf_err "$(hf_t "Token rejected by the API." "Token rechazado por la API.")"
         return 1
       fi
-      hf_config_set '.auth.token'  "$token"
+      hf_auth_save_token "$token"
       hf_config_set '.auth.method' "api"
       hf_auth_fetch_identity "$token" >/dev/null 2>&1 || true
       local _email; _email="$(hf_auth_email)"
@@ -155,7 +204,7 @@ hf_auth_device_flow() {
           hf_err "$(hf_t "The backend approved but returned no token. Try again." "El backend aprobó pero no entregó token. Reintenta.")"
           return 1
         fi
-        hf_config_set '.auth.token'  "$token"
+        hf_auth_save_token "$token"
         hf_config_set '.auth.method' "subscription"
         hf_auth_fetch_identity "$token" >/dev/null 2>&1 || true
         local _email; _email="$(hf_auth_email)"
