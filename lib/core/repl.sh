@@ -603,7 +603,7 @@ hf_status_line() {
   model="$(hf_config_get '.llm.model')"
   if [ -n "$provider" ] && [ -z "$model" ]; then
     case "$provider" in
-      claude|hiveflow) model="claude-sonnet-4-5-20250929" ;;
+      claude|hiveflow) model="claude-sonnet-5" ;;
       chatgpt)         model="gpt-4o" ;;
       gemini)          model="gemini-2.5-pro" ;;
     esac
@@ -1261,6 +1261,43 @@ user: $prompt"
   return $rc
 }
 
+HF_SHELL_WORDS=()
+hf_split_shell_words() {
+  local input="$1" token="" quote="" escaped=0 active=0 char i
+  HF_SHELL_WORDS=()
+  for ((i = 0; i < ${#input}; i++)); do
+    char="${input:i:1}"
+    if [ "$escaped" -eq 1 ]; then
+      token+="$char"
+      active=1
+      escaped=0
+      continue
+    fi
+    if [ "$quote" = "'" ]; then
+      if [ "$char" = "'" ]; then quote=""; else token+="$char"; active=1; fi
+      continue
+    fi
+    if [ "$char" = "\\" ]; then escaped=1; active=1; continue; fi
+    if [ -n "$quote" ]; then
+      if [ "$char" = "$quote" ]; then quote=""; else token+="$char"; active=1; fi
+      continue
+    fi
+    case "$char" in
+      "'"|"\"") quote="$char"; active=1 ;;
+      [[:space:]])
+        if [ "$active" -eq 1 ]; then
+          HF_SHELL_WORDS+=("$token")
+          token=""
+          active=0
+        fi
+        ;;
+      *) token+="$char"; active=1 ;;
+    esac
+  done
+  if [ -n "$quote" ] || [ "$escaped" -eq 1 ]; then return 1; fi
+  [ "$active" -eq 0 ] || HF_SHELL_WORDS+=("$token")
+}
+
 hf_handle_slash() {
   local line="$1"
   local cmd args
@@ -1315,7 +1352,14 @@ hf_handle_slash() {
     # ── Equipo de agentes (web/desktop/móvil) ──
     /agents)        hf_agents_cmd $args ;;
     # ── Swarm engine (vendored from asis-coder) ──
-    /swarm)         hf_engine_dispatch ${args:-status} ;;
+    /swarm)
+      if [ -z "$args" ]; then
+        hf_engine_dispatch status
+      elif hf_split_shell_words "$args"; then
+        hf_engine_dispatch "${HF_SHELL_WORDS[@]}"
+      else
+        hf_err "$(hf_t "Unclosed quote or escape in /swarm command." "Comilla o escape sin cerrar en el comando /swarm.")"
+      fi ;;
     /dashboard)     hf_engine_dispatch dashboard $args ;;
     /prd)           hf_engine_dispatch prd $args ;;
     /ralph)         hf_engine_dispatch ralph ${args:-help} ;;

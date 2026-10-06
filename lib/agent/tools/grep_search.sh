@@ -222,7 +222,7 @@ tool_grep_search_handler() {
     else
         # BSD/GNU grep compatibility: -r recursive, -n line number, -I skip binary,
         # -E ERE (mutually exclusive with -F), --exclude-dir=.git.
-        local grep_args=( -r -n -I --exclude-dir=.git )
+        local grep_args=( -r -n -H -I --exclude-dir=.git )
         [ "$case_insensitive" = true ] && grep_args+=( -i )
         if [ "$fixed_strings" = true ]; then
             grep_args+=( -F )

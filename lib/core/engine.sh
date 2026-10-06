@@ -71,7 +71,7 @@ else
   for _hf_mod in swarm_common swarm_role swarm_enroll swarm_daemon swarm_bootstrap \
                  swarm_wizard device_manager worktree_manager project_swarm \
                  swarm_manager agent_comm swarm_ralph prd_generator \
-                 swarm_project_wizard swarm_dashboard cli_orchestrator swarm_router; do
+                 swarm_project_wizard swarm_dashboard cli_orchestrator swarm_team swarm_router; do
     # shellcheck source=/dev/null
     if ! source "$HF_ENGINE_SRC/$_hf_mod.sh" 2>/dev/null; then
       HF_ENGINE_LOADED=""

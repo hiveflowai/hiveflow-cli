@@ -143,7 +143,7 @@ sessions_new() {
         --arg model "$model" \
         --arg label "$label" \
         --arg now "$now" \
-        '{id: $id, provider: $provider, model: $model, label: $label,
+        '{id: $id, provider: $provider, model: $model, "label": $label,
           created_at: $now, updated_at: $now, turn_count: 0}') || return 1
 
     _sessions_atomic_write "$path/meta.json" "$meta" || return 1
@@ -189,7 +189,7 @@ sessions_save() {
     if [ -z "${meta_in:-}" ] || ! printf '%s' "$meta_in" | jq empty >/dev/null 2>&1; then
         # Corrupted or missing — rebuild minimal meta.
         meta_in=$(jq -n --arg id "$id" --arg now "$now" \
-            '{id: $id, provider: "", model: "", label: "",
+            '{id: $id, provider: "", model: "", "label": "",
               created_at: $now, updated_at: $now, turn_count: 0}')
     fi
 
@@ -471,7 +471,7 @@ sessions_migrate_legacy() {
             --arg created "$iso" \
             --arg legacy_path "$file" \
             --arg legacy_basename "$basename" \
-            '{id:$id, provider:"", model:"", label:$label,
+            '{id:$id, provider:"", model:"", "label":$label,
               created_at:$created, updated_at:$created, turn_count:0,
               origin:"legacy_historial",
               legacy_path:$legacy_path,

@@ -51,7 +51,7 @@ case "${1:-}" in
       echo "  hiveflow agent --json \"prompt\"  Salida JSON: {ok, exit, response, tokens_*}"
       echo "  hiveflow --version      Versión"
       echo ""
-      echo "  Embebible: HIVEFLOW_LLM_PROVIDER/KEY/MODEL configuran el agente por env,"
+      echo "  Embebible: HIVEFLOW_LLM_PROVIDER/KEY/MODEL (+ HIVEFLOW_LLM_URL para ollama) configuran el agente por env,"
       echo "  --yes auto-aprueba tools mutantes (scripts/CI)."
       echo ""
       echo "  Dentro del REPL: /help lista todos los comandos."
@@ -65,7 +65,7 @@ case "${1:-}" in
       echo "  hiveflow agent --json \"prompt\"  JSON output: {ok, exit, response, tokens_*}"
       echo "  hiveflow --version      Version"
       echo ""
-      echo "  Embeddable: HIVEFLOW_LLM_PROVIDER/KEY/MODEL configure the agent via env,"
+      echo "  Embeddable: HIVEFLOW_LLM_PROVIDER/KEY/MODEL (+ HIVEFLOW_LLM_URL for ollama) configure the agent via env,"
       echo "  --yes auto-approves mutating tools (scripts/CI)."
       echo ""
       echo "  Inside the REPL: /help lists every command."
@@ -175,6 +175,8 @@ case "${1:-}" in
     shift
     hf_worker_cmd "$@"
     exit $? ;;
+  blurb)
+    shift; hf_blurb "$@" ;;
   tickets)
     # Non-interactive (cron/scripts): hiveflow tickets watch|list|fix|cron
     shift
