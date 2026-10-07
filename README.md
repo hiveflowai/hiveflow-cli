@@ -119,6 +119,22 @@ In `/mode safe` every mutating tool asks for confirmation; in `/mode auto` it ac
 
 **Production protections:** ticket content treated as untrusted (anti prompt-injection) · PRs blocked if they touch `.env`/secrets/CI, if the diff is oversized or empty · `.env`+`node_modules` injected into the worktree with no commit risk · timeouts on agents and tests · 1 ticket = 1 PR (idempotent retries) · ticket flood = pause + alert (systemic incident) · GC of zombie worktrees.
 
+### 🐝 Workers (your boards, your playbook)
+| | |
+|---|---|
+| `/worker add` | Wizard: board, columns, playbook, **engine** (`native` or `claude`, only offered if Claude Code is installed), **working folder** (`cwd`), cadence |
+| `/worker list\|show\|rm <name>` | Manage workers (`show` prints engine, folder and attachment settings) |
+| `/worker set <name> <field> <value>` | Edit `engine` (`native\|claude`), `cwd` (absolute path), `download_attachments` (`true\|false`) or `timeout` (seconds) without recreating the worker |
+| `/worker run <name>` · `/worker cron on <name>` | One pass now · a pass every N min (the cron line `cd`s into the worker's `cwd`) |
+
+**Engine `claude` and large attachments.** With `engine=claude` each card runs `claude -p "<prompt>" --dangerously-skip-permissions --output-format text` inside `cwd` (so the folder's `CLAUDE.md`, skills and repos apply), under the same timeout watchdog, using the machine's own Claude Code login — Hiveflow stores no token. Before the agent runs, the card's attachments (`card.files`) are downloaded to `<cwd>/.hiveflow/cards/<cardId>/raw/` (expired URLs are re-signed via `/api/files/refresh-url`; files already there with the same size are skipped). The agent writes results to `.../out/` and announces each file to send back with a line `HF_ATTACH: /absolute/path`; the worker uploads it with multipart (`/api/files/multipart/init` → PUT parts → `complete`), appends it to the card's files and comments `adjunté <name> (<MB>)`. Only files inside `out/` are uploaded. Workers without these fields behave exactly as before.
+
+```bash
+hiveflow worker set editor-reels engine claude
+hiveflow worker set editor-reels cwd "/Users/me/brand"
+hiveflow worker set editor-reels timeout 3600   # video editing takes a while
+```
+
 ### 🤖 Your agent team (the Agents tab, from the terminal)
 | | |
 |---|---|
