@@ -563,12 +563,19 @@ _hf_rc_collect_files() {
     json="$(printf '%s' "$json" | jq -c --argjson f "$item" '. + [$f]' 2>/dev/null || printf '%s' "$json")"
     n=$((n + 1))
   done < <(
-    # 1. marcador explícito: la línea entera es la ruta (admite espacios)
-    printf '%s\n' "$out" | sed -n 's/^[[:space:]]*HF_SEND:[[:space:]]*//p'
-    # 2. rutas entrecomilladas (así viajan los nombres con espacios)
-    printf '%s\n' "$out" | grep -oE "[\"'\`][^\"'\`]+\.($HF_RC_MEDIA_EXT)[\"'\`]" 2>/dev/null | sed -e 's/^.//' -e 's/.$//'
-    # 3. rutas o nombres sueltos SIN espacios
-    printf '%s\n' "$out" | grep -oE "[~/]?[A-Za-z0-9._/-]+\.($HF_RC_MEDIA_EXT)" 2>/dev/null
+    # 1. marcador explícito: la línea entera es la ruta (admite espacios).
+    #    Si hay marcadores, mandan solo ellos: la salida también trae el eco
+    #    del prompt (rutas de skills, etc.) y no debe colarse como adjunto.
+    local marked
+    marked="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*HF_SEND:[[:space:]]*//p')"
+    if [ -n "$marked" ]; then
+      printf '%s\n' "$marked"
+    else
+      # 2. rutas entrecomilladas (así viajan los nombres con espacios)
+      printf '%s\n' "$out" | grep -oE "[\"'\`][^\"'\`]+\.($HF_RC_MEDIA_EXT)[\"'\`]" 2>/dev/null | sed -e 's/^.//' -e 's/.$//'
+      # 3. rutas o nombres sueltos SIN espacios
+      printf '%s\n' "$out" | grep -oE "[~/]?[A-Za-z0-9._/-]+\.($HF_RC_MEDIA_EXT)" 2>/dev/null
+    fi
   )
   printf '%s' "$json"
 }
@@ -578,6 +585,13 @@ _hf_rc_collect_files() {
 # $2 = origen (web|agent), $3 = nombre del agente: cuando quien pregunta es un
 # agente autónomo, la instrucción pide resultados y archivos, no conversación.
 _hf_rc_prompt_with_files() {
+  # Las skills de esta máquina viajan en el prompt: el router puede mandar la
+  # tarea a cualquier motor (claude, nativo…) y todos deben poder seguirlas.
+  local skills_block
+  skills_block="$(hf_skills_prompt_block 2>/dev/null)"
+  [ -n "$skills_block" ] && set -- "$1
+
+$skills_block" "${@:2}"
   if [ "${2:-web}" = "agent" ]; then
     local who="${3:-agent}"
     printf '%s\n\n%s' "$1" "$(hf_t \
