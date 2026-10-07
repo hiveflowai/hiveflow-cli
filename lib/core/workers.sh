@@ -898,7 +898,7 @@ hf_worker_import() {
     '(.data.workerHeartbeats // {}) + {($n): (((.data.workerHeartbeats // {})[$n] // {}) + {host:$h, every:$ev, at:((now*1000)|floor)})}')"
   hf_api PATCH "/app-instances/$_b/data" \
     "$(jq -nc --argjson w "$_hb" '{op:"set", payload:{fields:{workerHeartbeats:$w}}}')" >/dev/null 2>&1
-  if [ "$(printf '%s' "$json" | jq -r '.cron // true')" = "true" ]; then
+  if [ "$(printf '%s' "$json" | jq -r 'if has("cron") then (.cron | tostring) else "true" end')" = "true" ]; then
     hf_worker_cron on "$name"
   fi
   # Primera pasada inmediata en segundo plano: feedback sin esperar al cron

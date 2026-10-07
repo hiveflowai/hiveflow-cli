@@ -275,6 +275,7 @@ check "import con campos nuevos" '[ "$(jq -c ".workers[\"web-claude\"] | [.engin
 b64="$(jq -nc '{name:"web-viejo", board_id:"b1", playbook:"x", cron:false}' | base64 | tr -d '\n')"
 hf_worker_import "$b64" >/dev/null
 check "import sin campos nuevos → worker clásico" '! _hf_worker_has_new_fields web-viejo'
+check "import con cron:false no instala cron" '! grep -q "# hiveflow-worker-web-claude$" "$TMP_DIR/crontab" 2>/dev/null && ! grep -q "# hiveflow-worker-web-viejo$" "$TMP_DIR/crontab" 2>/dev/null'
 
 hf_worker_cron on editor >/dev/null
 check "cron hace cd al cwd" 'grep "# hiveflow-worker-editor$" "$TMP_DIR/crontab" | grep -q "^\*/5 \* \* \* \* cd $BRAND && PATH="'
