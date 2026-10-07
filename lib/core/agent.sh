@@ -58,6 +58,17 @@ hf_docs_sync() {
   fi
 }
 
+# Skills (built-in + user) as a prompt section: name, description and path.
+# Any engine (native, claude, ...) reads the matching one and follows it
+# (e.g. "carrusel" to render slides). Empty when no skills are installed.
+hf_skills_prompt_block() {
+  declare -f skills_list >/dev/null 2>&1 || return 0
+  local rows
+  rows=$(skills_list 2>/dev/null | awk -F'\t' '{ printf "- %s: %s (%s)\n", $1, $2, $3 }')
+  [ -z "$rows" ] && return 0
+  printf '## Skills\nStep-by-step playbooks installed on this machine. When the task matches one\n(or names it), read its file FIRST and follow it.\n%s' "$rows"
+}
+
 hf_agent_project_context() {
   [ "${HIVEFLOW_NO_PROJECT_CONTEXT:-}" = "1" ] && return 0
   [ -n "${CODER_SYSTEM_PROMPT:-}" ] && return 0
@@ -77,6 +88,12 @@ $HF_CONFIG_DIR/api-reference.md
 Read it with read_file whenever the task involves driving Hiveflow via its API.
 To call it from bash_exec: curl -H \"Authorization: Bearer \$HIVEFLOW_API_TOKEN\" \$HIVEFLOW_API_BASE/api/<path> (both variables are already in your environment)."
   fi
+
+  local skills_block
+  skills_block="$(hf_skills_prompt_block)"
+  [ -n "$skills_block" ] && ctx="$ctx
+
+$skills_block"
 
   for f in AGENTS.md CLAUDE.md .agents.md; do
     if [ -f "$f" ]; then memfile="$f"; break; fi
