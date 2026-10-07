@@ -4,10 +4,32 @@
 # Hiveflow that watches ONE kanban board (support, sales, whatever) and
 # works its cards according to a user-defined PLAYBOOK, every N minutes.
 #
-#   /worker add            wizard: board, columns, playbook, cadence
+#   /worker add            wizard: board, columns, playbook, engine, folder, cadence
 #   /worker list|show|rm   manage workers
+#   /worker set <name> <field> <value>   edit engine|cwd|download_attachments|timeout
 #   /worker run <name>     one pass right now
 #   /worker cron on <name> automatic pass every N min (worker config)
+#
+# Optional fields per worker (.workers.<name>), all backward compatible:
+#   engine                native (CLI agent, default) | claude (Claude Code:
+#                         `claude -p … --dangerously-skip-permissions
+#                         --output-format text`, same timeout watchdog; uses
+#                         the machine's own Claude Code login)
+#   cwd                   absolute folder where the agent works (loads its
+#                         CLAUDE.md, skills, repos). Default: $HOME. The cron
+#                         line cd's into it.
+#   download_attachments  true (default) | false
+# A worker with NONE of the three behaves exactly as before. With any of
+# them, each card gets <cwd>/.hiveflow/cards/<cardId>/{raw,out}:
+#   · before: card.files → raw/ (curl, no 30 s cap; 403/404 + key →
+#     POST /files/refresh-url and retry; same size → skipped)
+#   · prompt: local paths + output rule: results in out/, one line
+#     `HF_ATTACH: /abs/path` per file to upload; last line still RESULT:
+#   · after: each HF_ATTACH inside out/ is uploaded with multipart
+#     (POST /files/multipart/init → PUT parts → complete; abort on error),
+#     appended to card.files via updateCard (board re-read right before)
+#     and commented "adjunté <name> (<MB>)". On failure: comment + file
+#     stays on disk.
 #
 # Human-in-the-middle flow is pure kanban:
 #   trigger (To Do) → working (In Progress) → review (QA) → human (HITL)

@@ -15,8 +15,9 @@ A practical manual. If you're looking for the command reference, it's in the
 6. [The bug agent, step by step](#the-bug-agent-step-by-step)
 7. [Is it working? Reading the metrics](#is-it-working-reading-the-metrics)
 8. [Tuning the agent with data](#tuning-the-agent-with-data)
-9. [Configuration](#configuration)
-10. [Common problems](#common-problems)
+9. [Workers with Claude Code and large attachments](#workers-with-claude-code-and-large-attachments)
+10. [Configuration](#configuration)
+11. [Common problems](#common-problems)
 
 ---
 
@@ -349,6 +350,61 @@ before the fix and compares what the agent does with what you did.
 
 The routing adjusts itself only when there's evidence (≥4 decided PRs and
 ≥60% acceptance in that repo). Without enough data it uses the default table.
+
+---
+
+## Workers with Claude Code and large attachments
+
+A worker can hand each card to **Claude Code** instead of the native agent and
+work with big files (raw videos, audio) attached to the card. Typical case: you
+drop a raw reel on a card, a worker on another machine downloads it, edits it
+with Claude Code using the knowledge in your brand folder, and puts the edited
+video back on the same card.
+
+### Set it up
+
+```
+/worker add                       # pick engine "claude" and the working folder
+# or, on an existing worker:
+/worker set editor-reels engine claude
+/worker set editor-reels cwd /Users/me/brand
+/worker set editor-reels timeout 3600
+/worker show editor-reels
+/worker cron on editor-reels      # the cron line cd's into the folder
+```
+
+| Field | Values | Default |
+|---|---|---|
+| `engine` | `native` \| `claude` | `native` |
+| `cwd` | absolute folder (its `CLAUDE.md`, skills and repos are loaded) | `$HOME` |
+| `download_attachments` | `true` \| `false` | `true` |
+
+The web can send the same fields through `/worker import` (`engine`, `cwd`,
+`download_attachments`). Claude Code uses the login that machine already has;
+Hiveflow stores no Claude token.
+
+### What happens on each card
+
+1. **Download.** `card.files` → `<cwd>/.hiveflow/cards/<cardId>/raw/`, with
+   `curl` and no 30 s cap. If a URL answers 403/404 and the file has a `key`,
+   the worker asks `/api/files/refresh-url` and retries. Files already on disk
+   with the same size are skipped.
+2. **Run.** The prompt adds the local paths and the output rule: write results
+   to `.../out/` and print one `HF_ATTACH: /absolute/path` line per file to send
+   back; the last line is still `RESULT: done|needs_human|error | note`.
+   With `engine=claude`: `cd <cwd> && claude -p "<prompt>"
+   --dangerously-skip-permissions --output-format text`, killed by the same
+   `timeout` watchdog.
+3. **Upload.** Each `HF_ATTACH` inside `out/` goes up with multipart
+   (`/api/files/multipart/init` → PUT of each part → `complete`; `abort` on
+   failure), is appended to `card.files` (the board is re-read right before,
+   so nothing is overwritten) and the worker comments
+   `worker:<name>: adjunté <file> (<MB>)`. If the upload fails, the error is
+   commented and the file stays on disk. Paths outside `out/` are ignored.
+
+`.hiveflow/` gets its own `.gitignore`, so it never ends up in a commit if the
+folder is a repo. Workers created before this feature (none of the three
+fields) behave exactly as before: no downloads, no `HF_ATTACH`.
 
 ---
 
