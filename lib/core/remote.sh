@@ -512,6 +512,9 @@ _hf_rc_activity() {
 HF_RC_MEDIA_EXT='png|jpe?g|gif|webp|avif|svg|heic|pdf|mp4|mov|webm|m4v|mp3|wav|csv|xlsx?|docx?|pptx?|zip|json|md|txt|log'
 HF_RC_UPLOAD_MAX_BYTES="${HF_RC_UPLOAD_MAX_BYTES:-26214400}"   # 25 MB (tope del backend)
 HF_RC_MAX_FILES="${HF_RC_MAX_FILES:-3}"
+# Con marcadores HF_SEND el agente eligió los archivos a propósito (p. ej. los
+# 10 slides + PDF de un carrusel): el tope sube. Debe caber en el del backend (30).
+HF_RC_MAX_FILES_MARKED="${HF_RC_MAX_FILES_MARKED:-30}"
 
 # Resuelve lo que el CLI mencionó a una ruta real: absoluta, ~, o un nombre
 # suelto ("INE.png") buscado en los sitios obvios.
@@ -550,11 +553,12 @@ _hf_rc_upload_one() {
 #   2. rutas o nombres de archivo de medios que aparecen en la salida
 # Devuelve un array JSON (vacío si no hay nada que mandar).
 _hf_rc_collect_files() {
-  local out="$1" cand resolved n=0 json="[]" item
+  local out="$1" cand resolved n=0 json="[]" item max="$HF_RC_MAX_FILES"
   local seen=" "
+  printf '%s\n' "$out" | grep -q '^[[:space:]]*HF_SEND:' && max="$HF_RC_MAX_FILES_MARKED"
   while IFS= read -r cand; do
     [ -z "$cand" ] && continue
-    [ "$n" -ge "$HF_RC_MAX_FILES" ] && break
+    [ "$n" -ge "$max" ] && break
     resolved="$(_hf_rc_resolve_path "$cand")" || continue
     case "$seen" in *" $resolved "*) continue ;; esac
     seen="$seen$resolved "
