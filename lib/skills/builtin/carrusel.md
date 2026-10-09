@@ -53,9 +53,9 @@ await pdfPage.pdf({ path: pdf, width: '1080px', height: '1350px', printBackgroun
 await browser.close();
 for (const f of [...files, pdf]) console.log(`HF_SEND: ${f}`);
 ```
-4. Si el HTML viene pegado en la tarea, guárdalo tal cual en `~/hiveflow-carruseles/<slug>-<AAAAMMDD-HHMM>/index.html`. Si es ruta o URL, úsala directo.
+4. Si la ruta está dentro de un repo git (p. ej. `~/Code/hiveflow/hiveflow-docs/...`), primero actualízalo: `git -C <raíz del repo> pull --ff-only` (si falla por cambios locales, dilo y renderiza lo que hay). Si el HTML viene pegado en la tarea, guárdalo tal cual en `~/hiveflow-carruseles/<slug>-<AAAAMMDD-HHMM>/index.html`. Si es ruta o URL, úsala directo.
 5. Renderiza: `cd ~/.hiveflow/carrusel && node render.mjs "<index.html o URL>" "~/hiveflow-carruseles/<slug>-<AAAAMMDD-HHMM>" <formato>` (expande `~` a la ruta absoluta).
 6. Revisa la salida: debe haber tantas imágenes como slides y un PDF. Si una fuente no cargó o un slide salió vacío, dilo en el resultado.
 
 Resultado: número de slides y carpeta de salida. Tu respuesta DEBE terminar con las líneas `HF_SEND: /ruta/absoluta` que imprimió el script (una por imagen y una del PDF), copiadas tal cual, cada una en su propia línea y sin formato markdown. Sin esas líneas los archivos NO se entregan.
-Nota: el puente manda como máximo `HF_RC_MAX_FILES` archivos por respuesta (3 por defecto). Para carruseles, la máquina debe tener `HF_RC_MAX_FILES=10`.
+Nota: con líneas HF_SEND el puente manda hasta 30 archivos por respuesta (`HF_RC_MAX_FILES_MARKED`).
