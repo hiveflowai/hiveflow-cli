@@ -54,8 +54,8 @@ hf_intake_push() {
     | if ($t | index($col)) then $t else $t + [$col] end')"
 
   hf_api PATCH "/app-instances/$kid/data" \
-    "$(jq -nc --argjson cards "$cards" --argjson cols "$cols" \
-      '{op:"set", payload:{fields:{cards:$cards, columns:$cols}}}')" >/dev/null \
+    "$(printf '%s' "$cards" | jq -c --argjson cols "$cols" \
+      '{op:"set", payload:{fields:{cards:., columns:$cols}}}')" >/dev/null \
     && { echo "$(hf_t "[intake] $tid created ($source, $priority): $title" "[intake] $tid creado ($source, $priority): $title")"; hf_metric intake_created "$tid" source="$source" priority="$priority"; }
 }
 
