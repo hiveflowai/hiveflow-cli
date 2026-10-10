@@ -50,10 +50,16 @@ hf_api() {
   ws="$(hf_config_get '.tickets.workspace_id')"
   [ -n "$org" ] && args+=(-H "X-Organization-Id: $org")
   [ -n "$ws" ]  && args+=(-H "X-Workspace-Id: $ws")
-  [ -n "$body" ] && args+=(-d "$body")
   # Backend wraps responses in {success, data}: unwrap here so all
   # consumers see the raw instance/list.
-  curl "${args[@]}" | jq -c 'if (type=="object" and .success != null and .data != null) then .data else . end' 2>/dev/null
+  local unwrap='if (type=="object" and .success != null and .data != null) then .data else . end'
+  if [ -n "$body" ]; then
+    # The body goes through stdin, never argv: a whole board can be several MB
+    # and blows the OS argument limit ("Argument list too long").
+    printf '%s' "$body" | curl "${args[@]}" --data-binary @- | jq -c "$unwrap" 2>/dev/null
+  else
+    curl "${args[@]}" | jq -c "$unwrap" 2>/dev/null
+  fi
 }
 
 # ── Dynamic repo catalog ───────────────────────────────────────
@@ -471,8 +477,8 @@ hf_ticket_move() {
     [(.data.columns // [])[] | if type == "object" then .title else . end] as $t
     | if ($t | index($col)) then $t else $t + [$col] end')"
   hf_api PATCH "/app-instances/$kid/data" \
-    "$(jq -nc --argjson cards "$cards" --argjson cols "$cols" \
-      '{op:"set", payload:{fields:{cards:$cards, columns:$cols}}}')" >/dev/null
+    "$(printf '%s' "$cards" | jq -c --argjson cols "$cols" \
+      '{op:"set", payload:{fields:{cards:., columns:$cols}}}')" >/dev/null
 }
 
 # ── Pipeline /fix ─────────────────────────────────────────────

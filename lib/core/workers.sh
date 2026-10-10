@@ -249,8 +249,8 @@ _hf_card_update() { # <board> <tid> <jq-extra>
   updates="$(printf '%s' "$cards" | jq -c --arg id "$cid" \
     "[.[] | select((.id | tostring) == \$id)][0] | ($extra) | {files: (.files // []), comments: (.comments // [])}")" || return 1
   hf_api PATCH "/app-instances/$board/data" \
-    "$(jq -nc --argjson ex "$cards" --arg id "$cid" --argjson up "$updates" \
-      '{op:"updateCard", payload:{cardId:$id, updates:$up, existingCards:$ex, source:"worker"}}')" >/dev/null
+    "$(printf '%s' "$cards" | jq -c --arg id "$cid" --argjson up "$updates" \
+      '{op:"updateCard", payload:{cardId:$id, updates:$up, existingCards:., source:"worker"}}')" >/dev/null
 }
 
 # Sube cada HF_ATTACH (solo dentro de <card-dir>/out/) y lo agrega a
