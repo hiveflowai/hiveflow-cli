@@ -1616,6 +1616,10 @@ _register_agentic_tools() {
             return 1
         fi
     done
+    # hiveflow_mode solo aplica con sesión de HiveFlow y sin una lista explícita de tools
+    if [ -z "${CODER_AGENT_TOOLS:-}" ] && declare -f hf_auth_token >/dev/null 2>&1 && [ -n "$(hf_auth_token 2>/dev/null)" ]; then
+        register_tool hiveflow_mode >/dev/null 2>&1 || true
+    fi
     # P1.mcp-4b: si lib/mcp_client.sh está cargado, abre primero las conexiones
     # a los servers MCP marcados como `enabled: true` en $CODER_MCP_CONFIG. Cada
     # fallo es non-fatal (warn a stderr + continúa). Después auto-registra las
