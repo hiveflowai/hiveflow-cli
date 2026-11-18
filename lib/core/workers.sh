@@ -679,6 +679,12 @@ _hf_worker_run_inner() {
   local inst colmap
   inst="$(HF_KANBAN_ID="$board" hf_api GET "/app-instances/$board")"
   [ -z "$inst" ] && { echo "[worker:$name] ERROR: $(hf_t "could not read the board" "no se pudo leer el tablero")"; return 1; }
+  # El backend respondió, pero con un rechazo ({success:false}): p. ej. la API key fue
+  # revocada. Sin esto la pasada seguía y mandaba el latido (otra llamada rechazada).
+  if [ "$(printf '%s' "$inst" | jq -r 'if type=="object" and .success == false then "rejected" else "" end' 2>/dev/null)" = "rejected" ]; then
+    echo "[worker:$name] ERROR: $(hf_t "the backend rejected the request" "el backend rechazó la petición"): $(printf '%s' "$inst" | jq -r '.error // .message // "?"' 2>/dev/null) — $(hf_t "run /login in this machine" "ejecuta /login en esta máquina")"
+    return 1
+  fi
   colmap="$(echo "$inst" | _hf_colmap)"
 
   # Latido en el tablero: el panel 🐝 Workers de la web lista este worker
