@@ -428,6 +428,7 @@ Two homes, depending on the layer:
 | `tickets.automerge.docs` | false | Auto-merge of docs-only changes |
 | `tickets.automerge.deps` | false | Auto-merge of deps-only changes |
 | `tickets.*_column` | — | Kanban column names |
+| `update.auto` | true | Set to `"false"` to stop updating on open (you still get the `/update` notice) |
 
 **`~/.config/coder-cli/`** — the native agent state:
 
@@ -445,6 +446,17 @@ inject AGENTS.md/structure), `TOOL_LOOP_MAX_ITERATIONS` (loop iterations,
 default 40), `CODER_CLAUDE_MODEL` / `CODER_OPENAI_MODEL` / `CODER_GEMINI_MODEL`
 (models per provider; unset: `claude-sonnet-5` / `gpt-4o` /
 `gemini-2.5-pro`).
+
+**Updates.** When you open hiveflow (the REPL or `hiveflow remote control`)
+it checks for a new version, downloads it and restarts itself on it; at most
+one check per hour, with a time limit, so with no network it just starts. A
+git clone is only updated when it sits on the default branch with no local
+changes — a development checkout is never touched. One-shot modes (`-p`,
+`agent`) never update. Turn it off with `HIVEFLOW_NO_AUTO_UPDATE=1` or
+`update.auto`. A Remote Control session kept alive by a service (launchd,
+systemd) can also pick up new versions on its own: export
+`HF_RC_RESTART_ON_UPDATE=1` in the service and, when idle, it checks every 30
+minutes and stops itself so the supervisor starts it again, updated.
 
 Default columns for the ticket flow (Spanish names, configurable via
 `tickets.*_column`):
