@@ -285,6 +285,52 @@ _hf_rc_resolve_agent() {
   return 0
 }
 
+# ── Rechazo de credenciales ───────────────────────────────────
+# El relay puede rechazar a esta terminal de forma permanente: API key revocada o
+# caducada (401), o fuera de sus permisos / de la lista de IPs de la organización
+# (403). Antes el espejo ignoraba ese rechazo y seguía preguntando cada 2 s para
+# siempre: una key revocada generaba ~30 errores por minuto en el backend.
+# Ahora cada llamada anota su código HTTP y el daemon se detiene solo tras
+# HF_RC_AUTH_FAIL_MAX rechazos seguidos, pidiendo iniciar sesión de nuevo.
+
+# Separa "cuerpo\n<código>" (curl -w '\n%{http_code}'). Sin un código al final
+# deja el cuerpo intacto. Deja el resultado en _HF_RC_BODY / _HF_RC_CODE.
+_hf_rc_split_status() {
+  local raw="$1" last="${1##*$'\n'}"
+  if [[ "$last" =~ ^[0-9][0-9][0-9]$ ]] && [ "$last" != "$raw" ]; then
+    _HF_RC_CODE="$last"; _HF_RC_BODY="${raw%$'\n'*}"
+  elif [[ "$raw" =~ ^[0-9][0-9][0-9]$ ]]; then
+    _HF_RC_CODE="$raw"; _HF_RC_BODY=""
+  else
+    _HF_RC_CODE=""; _HF_RC_BODY="$raw"
+  fi
+}
+
+# El sondeo corre en un subshell ($(...)): el código viaja por archivo.
+_hf_rc_note_status() {
+  local d; d="$(_hf_rc_state_dir)"
+  [ -d "$d" ] || return 0
+  printf '%s' "$1" > "$d/last_status" 2>/dev/null || true
+}
+_hf_rc_last_status() { cat "$(_hf_rc_state_dir)/last_status" 2>/dev/null; }
+
+# 401/403 = el backend no acepta estas credenciales. Reintentar no lo arregla.
+_hf_rc_is_auth_rejection() { [ "$1" = "401" ] || [ "$1" = "403" ]; }
+
+# Detiene el espejo de esta terminal y explica cómo volver a conectarla.
+_hf_rc_auth_stop() {
+  local sid="$1" code="$2" d
+  d="$(_hf_rc_state_dir)"
+  printf '%s' "auth_rejected:$code" > "$d/stopped" 2>/dev/null || true
+  rm -f "$d/daemon.pid" 2>/dev/null
+  echo "[rc $(date '+%F %T')] $(hf_t "stopped: the backend rejected this terminal's credentials (HTTP $code)" "detenido: el backend rechazó las credenciales de esta terminal (HTTP $code)")"
+  {
+    printf '\n  \033[31m✗\033[0m %s\n' "$(hf_t "Remote Control stopped: the backend rejected this terminal's credentials (HTTP $code)." "Remote Control se detuvo: el backend rechazó las credenciales de esta terminal (HTTP $code).")"
+    printf '  \033[2m%s\033[0m\n\n%s' "$(hf_t "Your API key was revoked or expired. Run /login and then /remote control to reconnect." "Tu API key fue revocada o caducó. Ejecuta /login y después /remote control para volver a conectar.")" "$(hf_prompt_label 2>/dev/null)"
+  } > /dev/tty 2>/dev/null || true
+  hf_metric rc_auth_stop "" session="$sid" code="$code" 2>/dev/null || true
+}
+
 # Latido: renueva last_seen. La web marca "desconectada" si no hay latido reciente.
 _hf_relay_heartbeat() {
   local sid="$1"
@@ -293,8 +339,12 @@ _hf_relay_heartbeat() {
              [ -f "$f" ] || return 0; tmp="$(mktemp)"
              jq --argjson t "$(date +%s)" '.last_seen=$t | .status="connected"' "$f" > "$tmp" && mv "$tmp" "$f" ;;
     http:*)  local url r ok; url="$(hf_remote_relay)"; url="${url#http:}"
-             r="$(curl -s -m 8 -X POST "${url}/heartbeat" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
+             r="$(curl -s -m 8 -w '\n%{http_code}' -X POST "${url}/heartbeat" -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
                -d "$(jq -nc --arg s "$sid" '{session_id:$s}')" 2>/dev/null)"
+             _hf_rc_split_status "$r"; r="$_HF_RC_BODY"
+             [ -n "$_HF_RC_CODE" ] && _hf_rc_note_status "$_HF_RC_CODE"
+             # Credenciales rechazadas: re-registrarse no sirve; el daemon decide parar.
+             _hf_rc_is_auth_rejection "$_HF_RC_CODE" && return 0
              # OJO jq: 'false // empty' da vacío ('//' trata false como
              # ausente) — hay que leer .ok tal cual
              ok="$(printf '%s' "$r" | jq -r '.ok' 2>/dev/null)"
@@ -336,7 +386,9 @@ _hf_relay_poll() {
       rm -f "$dir/inbox/$f" ;;
     http:*)
       local url; url="$(hf_remote_relay)"; url="${url#http:}"
-      local r; r="$(curl -s -m 35 "${url}/poll?session=$sid" -H "Authorization: Bearer $(hf_auth_token)" 2>/dev/null)"
+      local r; r="$(curl -s -m 35 -w '\n%{http_code}' "${url}/poll?session=$sid" -H "Authorization: Bearer $(hf_auth_token)" 2>/dev/null)"
+      _hf_rc_split_status "$r"; r="$_HF_RC_BODY"
+      [ -n "$_HF_RC_CODE" ] && _hf_rc_note_status "$_HF_RC_CODE"
       [ -z "$r" ] || [ "$r" = "{}" ] && return 0
       # Cualquier respuesta que NO sea un mensaje (error de auth, proxy,
       # sesión purgada tras un redeploy…) carece de msg_id/text: sin este
@@ -715,12 +767,30 @@ hf_rc_stop() {
 # El bucle del daemon: latido + poll + ejecutar + responder. Lo que pide la
 # web se muestra también en la terminal del usuario (via /dev/tty).
 _hf_rc_daemon() {
-  local sid="$1" mid text beats=0
+  local sid="$1" mid text beats=0 auth_fails=0 net_fails=0 code
+  local auth_max="${HF_RC_AUTH_FAIL_MAX:-3}"
+  rm -f "$(_hf_rc_state_dir)/stopped" "$(_hf_rc_state_dir)/last_status" 2>/dev/null
   trap '_hf_relay_disconnect "$sid"; exit 0' INT TERM
   while true; do
     beats=$((beats + 1))
     [ $((beats % 5)) -eq 1 ] && _hf_relay_heartbeat "$sid"
     local pending; pending="$(_hf_relay_poll "$sid")"
+    # Credenciales rechazadas varias veces seguidas: parar en vez de insistir.
+    code="$(_hf_rc_last_status)"
+    if _hf_rc_is_auth_rejection "$code"; then
+      auth_fails=$((auth_fails + 1))
+      if [ "$auth_fails" -ge "$auth_max" ]; then
+        _hf_rc_auth_stop "$sid" "$code"
+        exit 0
+      fi
+    else
+      auth_fails=0
+      # Backend caído o sin red (000, 5xx): esperar cada vez más, hasta 30 s.
+      case "$code" in
+        000|5[0-9][0-9]) net_fails=$((net_fails + 1)) ;;
+        *)               net_fails=0 ;;
+      esac
+    fi
     if [ -n "$pending" ]; then
       # msg_id<TAB>origen<TAB>nombre<TAB>texto
       local okind oname rest
@@ -778,7 +848,11 @@ _hf_rc_daemon() {
       { printf '  \033[32m✓\033[0m %s\n\n%s' "$(hf_t "answered to the web" "respondido a la web")" "$(hf_prompt_label)"; } > /dev/tty 2>/dev/null || true
       hf_metric rc_message "" session="$sid"
     else
-      sleep "${HF_RC_POLL:-2}"
+      local wait="${HF_RC_POLL:-2}"
+      if [ "$net_fails" -gt 0 ]; then
+        wait=$((wait * (net_fails + 1))); [ "$wait" -gt 30 ] && wait=30
+      fi
+      sleep "$wait"
     fi
   done
 }
