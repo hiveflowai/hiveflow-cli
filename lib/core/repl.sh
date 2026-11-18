@@ -1133,7 +1133,9 @@ _hf_native_turn() {
   hf_rc_mirror_active 2>/dev/null && ( _hf_rc_activity 1 ) >/dev/null 2>&1 &
   hf_agent_turn "$HF_REPL_SESSION" "$1"
   local rc=$?
-  if hf_rc_mirror_active 2>/dev/null; then
+  # A request that came FROM the web is answered by the daemon (/respond):
+  # appending it too would show the reply twice in the chat.
+  if [ -z "${HF_RUN_FROM_RC:-}" ] && hf_rc_mirror_active 2>/dev/null; then
     local a; a="$(hf_session_last_assistant "$HF_REPL_SESSION")"
     [ -n "$a" ] && ( _hf_rc_append assistant "$a" ) >/dev/null 2>&1 &
     ( _hf_rc_activity 0 ) >/dev/null 2>&1 &
@@ -1141,9 +1143,27 @@ _hf_native_turn() {
   return $rc
 }
 
-# Runs a code request with the active tool or the router
+# Terminal-only chrome (router line, command echo, exit status). When the
+# request comes from Remote Control (HF_RUN_FROM_RC) stdout is what the web
+# chat receives, so the chrome goes to the terminal instead — or nowhere.
+_hf_run_chrome() {
+  if [ -n "${HF_RUN_FROM_RC:-}" ]; then
+    { "$@"; } 2>/dev/null >/dev/tty || true
+  else
+    "$@"
+  fi
+}
+
+# Runs a code request with the active tool or the router.
+# HF_RUN_INSTRUCTIONS (optional): extra instructions for the engine, appended
+# to what it receives. They are NOT part of the user's request: the router,
+# the echoed command and the thread history only see "$1".
 hf_run_request() {
   local prompt="$1"
+  local extra="${HF_RUN_INSTRUCTIONS:-}" full_prompt="$1"
+  [ -n "$extra" ] && full_prompt="$prompt
+
+$extra"
   local tool mode
   tool="$(hf_active_tool)"
   mode="$(hf_active_mode)"
@@ -1151,9 +1171,9 @@ hf_run_request() {
   # Native agent explicitly set → turn on the REPL's CONVERSATION
   if [ "$tool" = "native" ]; then
     if hf_repl_session_ensure; then
-      _hf_native_turn "$prompt"
+      _hf_native_turn "$full_prompt"
     else
-      hf_agent_run "$prompt"
+      hf_agent_run "$full_prompt"
     fi
     return $?
   fi
@@ -1166,12 +1186,12 @@ hf_run_request() {
       hf_err "$(hf_t "No CLI installed and no API key for the native agent. Use /install all or /llm" "No hay ningún CLI instalado ni API key para el agente nativo. Usa /install all o /llm")"
       return 1
     fi
-    hf_info "$(hf_t "Router: task '${task_type}'" "Router: tarea '${task_type}'") → ${HF_C_BOLD}${tool}${HF_C_RESET}"
+    _hf_run_chrome hf_info "$(hf_t "Router: task '${task_type}'" "Router: tarea '${task_type}'") → ${HF_C_BOLD}${tool}${HF_C_RESET}"
     if [ "$tool" = "native" ]; then
       if hf_repl_session_ensure; then
-        _hf_native_turn "$prompt"
+        _hf_native_turn "$full_prompt"
       else
-        hf_agent_run "$prompt"
+        hf_agent_run "$full_prompt"
       fi
       return $?
     fi
@@ -1192,10 +1212,13 @@ $ctx
 
 user: $prompt"
   fi
-  hf_dim "$ $(hf_tool_cmd "$tool" "$prompt" "$mode")"
-  [ -n "$ctx" ] && hf_dim "  $(hf_t "(+ thread context: $(printf '%s' "$ctx" | grep -c .) lines)" "(+ contexto del hilo: $(printf '%s' "$ctx" | grep -c .) líneas)")"
+  [ -n "$extra" ] && run_prompt="$run_prompt
+
+$extra"
+  _hf_run_chrome hf_dim "$ $(hf_tool_cmd "$tool" "$prompt" "$mode")"
+  [ -n "$ctx" ] && _hf_run_chrome hf_dim "  $(hf_t "(+ thread context: $(printf '%s' "$ctx" | grep -c .) lines)" "(+ contexto del hilo: $(printf '%s' "$ctx" | grep -c .) líneas)")"
   cmd="$(hf_tool_cmd "$tool" "$run_prompt" "$mode")"
-  echo ""
+  _hf_run_chrome echo ""
   # Clean environment for external CLIs:
   # - whatever the native agent exported this session (keys/proxy) must
   #   not be inherited — with the hiveflow provider, ANTHROPIC_API_KEY is
@@ -1243,7 +1266,7 @@ user: $prompt"
     # Remote Control mirror: the reply also goes to the Genius thread.
     # (captured BEFORE the rm: in a background job the expansion happens
     # in the child and the file might no longer exist → 'cat: No such file')
-    if hf_rc_mirror_active 2>/dev/null; then
+    if [ -z "${HF_RUN_FROM_RC:-}" ] && hf_rc_mirror_active 2>/dev/null; then
       ( _hf_rc_append assistant "$clean_out" ) >/dev/null 2>&1 &
       ( _hf_rc_activity 0 ) >/dev/null 2>&1 &
     fi
@@ -1258,14 +1281,15 @@ user: $prompt"
     if hf_repl_session_ensure; then
       hf_session_append_exchange "$HF_REPL_SESSION" "$prompt" "$clean_out2" "$tool"
     fi
-    if hf_rc_mirror_active 2>/dev/null; then
+    # (a request FROM the web is answered by the daemon: no second copy)
+    if [ -z "${HF_RUN_FROM_RC:-}" ] && hf_rc_mirror_active 2>/dev/null; then
       ( _hf_rc_append assistant "$clean_out2" ) >/dev/null 2>&1 &
       ( _hf_rc_activity 0 ) >/dev/null 2>&1 &
     fi
     rm -f "$out_file2"
   fi
-  echo ""
-  [ $rc -eq 0 ] && hf_ok "$(hf_t "$tool finished (exit 0)" "$tool terminó (exit 0)")" || hf_warn "$(hf_t "$tool exited with code $rc" "$tool salió con código $rc")"
+  _hf_run_chrome echo ""
+  [ $rc -eq 0 ] && _hf_run_chrome hf_ok "$(hf_t "$tool finished (exit 0)" "$tool terminó (exit 0)")" || hf_warn "$(hf_t "$tool exited with code $rc" "$tool salió con código $rc")"
   return $rc
 }
 

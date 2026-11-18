@@ -638,26 +638,30 @@ _hf_rc_collect_files() {
 
 # Con el espejo activo, el CLI que atiende a la web necesita saber que PUEDE
 # mandar archivos: se le pide que imprima el marcador en vez de describirlos.
-# $2 = origen (web|agent), $3 = nombre del agente: cuando quien pregunta es un
+# $1 = origen (web|agent), $2 = nombre del agente: cuando quien pregunta es un
 # agente autónomo, la instrucción pide resultados y archivos, no conversación.
-_hf_rc_prompt_with_files() {
+# Solo las INSTRUCCIONES (skills + nota): la tarea de la persona va aparte.
+_hf_rc_instructions() {
   # Las skills de esta máquina viajan en el prompt: el router puede mandar la
   # tarea a cualquier motor (claude, nativo…) y todos deben poder seguirlas.
   local skills_block
   skills_block="$(hf_skills_prompt_block 2>/dev/null)"
-  [ -n "$skills_block" ] && set -- "$1
-
-$skills_block" "${@:2}"
-  if [ "${2:-web}" = "agent" ]; then
-    local who="${3:-agent}"
-    printf '%s\n\n%s' "$1" "$(hf_t \
+  [ -n "$skills_block" ] && printf '%s\n\n' "$skills_block"
+  if [ "${1:-web}" = "agent" ]; then
+    local who="${2:-agent}"
+    printf '%s' "$(hf_t \
 "[Hiveflow Remote Control] You are answering the HiveFlow agent \"$who\", an autonomous agent — NOT a person. It delegated this task to this computer and will read your output as a tool result. Do the task, then return RESULTS: what you did, findings, paths, errors — concise and factual, no greetings or questions. If a file is part of the result (image, video, PDF, document, report), print at the end one line per file, exactly: HF_SEND: /absolute/path. The bridge uploads it and hands it to the agent. Never claim a file was delivered without that line." \
 "[Hiveflow Remote Control] Le respondes al agente de HiveFlow \"$who\", un agente autónomo — NO una persona. Te delegó esta tarea y leerá tu salida como el resultado de una herramienta. Haz la tarea y devuelve RESULTADOS: qué hiciste, hallazgos, rutas, errores — conciso y factual, sin saludos ni preguntas. Si un archivo forma parte del resultado (imagen, video, PDF, documento, reporte), imprime al final una línea por archivo, exactamente así: HF_SEND: /ruta/absoluta. El puente lo sube y se lo entrega al agente. Nunca digas que entregaste un archivo sin esa línea.")"
     return 0
   fi
-  printf '%s\n\n%s' "$1" "$(hf_t \
+  printf '%s' "$(hf_t \
 "[Hiveflow Remote Control] You are answering someone who is NOT at this terminal: they read you in a web chat and cannot see this screen. If the answer involves a file (image, video, PDF, document) — because they asked to see it, or you produced it — print at the end one line per file, exactly: HF_SEND: /absolute/path. The bridge uploads it and shows it in the chat. Never claim a file was shown without that line." \
 "[Hiveflow Remote Control] Le respondes a alguien que NO está en esta terminal: te lee en un chat web y no ve esta pantalla. Si la respuesta involucra un archivo (imagen, video, PDF, documento) — porque pidió verlo, o porque lo generaste — imprime al final una línea por archivo, exactamente así: HF_SEND: /ruta/absoluta. El puente lo sube y lo muestra en el chat. Nunca digas que mostraste un archivo sin esa línea.")"
+}
+
+# Tarea + instrucciones en un solo texto (lo que acaba recibiendo el motor).
+_hf_rc_prompt_with_files() {
+  printf '%s\n\n%s' "$1" "$(_hf_rc_instructions "${2:-web}" "${3:-agent}")"
 }
 
 # /send <ruta> — mandar un archivo a la conversación de Genius a mano.
@@ -811,11 +815,21 @@ _hf_rc_daemon() {
       else
         # El prompt lleva la instrucción del marcador: quien pregunta está en
         # la web y necesita el ARCHIVO, no su descripción.
-        ( HIVEFLOW_NO_SPINNER=1 hf_run_request "$(_hf_rc_prompt_with_files "$text" "$okind" "$oname")" ) > "$outf" 2>&1 &
+        # Las instrucciones viajan APARTE (HF_RUN_INSTRUCTIONS): el router, el
+        # eco del comando y el historial del hilo solo ven lo que escribió la
+        # persona. HF_RUN_FROM_RC=1: lo que es adorno de terminal (router, eco)
+        # se pinta en la terminal y no se manda a la web.
+        ( HIVEFLOW_NO_SPINNER=1 HF_RUN_FROM_RC=1 HF_RUN_INSTRUCTIONS="$(_hf_rc_instructions "$okind" "$oname")" hf_run_request "$text" ) > "$outf" 2>&1 &
       fi
       runpid=$!
       sent=0
+      # Mientras la tarea corre este bucle no hace poll: sin latido propio la
+      # web daría la sesión por desconectada a los 30 s (y una tarea larga —
+      # armar una página, un video — dura minutos). Un latido cada ~10 s.
+      local ticks=0
       while kill -0 "$runpid" 2>/dev/null; do
+        ticks=$((ticks + 1))
+        [ $((ticks % 10)) -eq 0 ] && _hf_relay_heartbeat "$sid"
         total=$(wc -l < "$outf" 2>/dev/null | tr -d ' ')
         if [ "${total:-0}" -gt "$sent" ]; then
           new="$(sed -n "$((sent + 1)),${total}p" "$outf")"
