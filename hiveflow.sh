@@ -34,6 +34,15 @@ done
 
 hf_config_init
 
+# Actualización automática al abrir: solo en los modos con persona delante o de
+# servicio. `-p`, `agent` y demás one-shots se embeben en scripts (stdout = la
+# respuesta) y no deben ni tardar ni imprimir nada de más.
+HF_ENTRY="${BASH_SOURCE[0]}"
+case "${1:-}" in
+  "")     hf_auto_update "" "$@" ;;
+  remote) hf_auto_update force "$@" ;;
+esac
+
 case "${1:-}" in
   --version|-v)
     echo "hiveflow $HIVEFLOW_VERSION"

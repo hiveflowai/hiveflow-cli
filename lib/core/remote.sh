@@ -331,6 +331,30 @@ _hf_rc_auth_stop() {
   hf_metric rc_auth_stop "" session="$sid" code="$code" 2>/dev/null || true
 }
 
+# Un espejo que vive días (un servicio: launchd, systemd) corre el código que
+# cargó al arrancar. Con HF_RC_RESTART_ON_UPDATE=1, cuando está libre comprueba
+# cada HF_RC_UPDATE_CHECK_SECS (30 min) si hay versión nueva y, si la hay, se
+# detiene: quien lo supervisa lo vuelve a levantar y `hiveflow remote control`
+# se actualiza al arrancar. Solo con esa variable: en una terminal con persona,
+# el espejo no se apaga solo. Devuelve 0 si toca reiniciar.
+_HF_RC_UPDATE_LAST=0
+_hf_rc_update_due() {
+  [ "${HF_RC_RESTART_ON_UPDATE:-0}" = "1" ] || return 1
+  declare -f hf_update_refresh >/dev/null 2>&1 || return 1
+  local now; now="$(date +%s)"
+  [ "$_HF_RC_UPDATE_LAST" -eq 0 ] && { _HF_RC_UPDATE_LAST="$now"; return 1; }   # recién arrancado: ya se actualizó
+  [ $((now - _HF_RC_UPDATE_LAST)) -lt "${HF_RC_UPDATE_CHECK_SECS:-1800}" ] && return 1
+  _HF_RC_UPDATE_LAST="$now"
+  hf_auto_update_enabled && hf_update_refresh && hf_update_available >/dev/null
+}
+
+_hf_rc_update_stop() {
+  local d; d="$(_hf_rc_state_dir)"
+  printf '%s' "update" > "$d/stopped" 2>/dev/null || true
+  rm -f "$d/daemon.pid" 2>/dev/null
+  echo "[rc $(date '+%F %T')] $(hf_t "stopped to load a new version of the CLI" "detenido para cargar una versión nueva del CLI")"
+}
+
 # Latido: renueva last_seen. La web marca "desconectada" si no hay latido reciente.
 _hf_relay_heartbeat() {
   local sid="$1"
@@ -862,6 +886,11 @@ _hf_rc_daemon() {
       { printf '  \033[32m✓\033[0m %s\n\n%s' "$(hf_t "answered to the web" "respondido a la web")" "$(hf_prompt_label)"; } > /dev/tty 2>/dev/null || true
       hf_metric rc_message "" session="$sid"
     else
+      # Libre y con versión nueva (solo servicios): salir para que el supervisor relance.
+      if _hf_rc_update_due; then
+        _hf_rc_update_stop
+        exit 0
+      fi
       local wait="${HF_RC_POLL:-2}"
       if [ "$net_fails" -gt 0 ]; then
         wait=$((wait * (net_fails + 1))); [ "$wait" -gt 30 ] && wait=30

@@ -4,15 +4,108 @@
 #   git — clone con ./install.sh (symlinks al repo) → git pull
 #   npm — npm install -g @hiveflow/cli
 #
-# El check corre en background como mucho una vez al día y cachea
-# el resultado en config (.update.*); el aviso sale en el siguiente
-# arranque. Nunca bloquea el arranque ni requiere red.
+# Al abrir el CLI (REPL o `remote control`) se comprueba si hay versión nueva
+# y, si la hay, se baja y el CLI se relanza ya actualizado (hf_auto_update).
+# La comprobación tiene tope de tiempo: sin red, el CLI arranca igual.
+# Apagarlo: HIVEFLOW_NO_AUTO_UPDATE=1 o `.update.auto = "false"` en la config;
+# entonces queda el aviso de siempre ("Ejecuta /update").
 
 HF_UPDATE_INTERVAL="${HIVEFLOW_UPDATE_INTERVAL:-86400}"
+HF_AUTO_UPDATE_INTERVAL="${HIVEFLOW_AUTO_UPDATE_INTERVAL:-3600}"   # como mucho una comprobación por hora
 HF_NPM_REGISTRY="https://registry.npmjs.org/@hiveflow%2fcli/latest"
 
+# Corre un comando con tope de tiempo (macOS no trae `timeout`).
+_hf_timeout() {
+  local secs="$1" pid watchdog rc
+  shift
+  "$@" &
+  pid=$!
+  # El vigilante no hereda la salida: si no, un $(...) esperaría a su sleep.
+  ( sleep "$secs"; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watchdog=$!
+  wait "$pid" 2>/dev/null; rc=$?
+  kill "$watchdog" 2>/dev/null
+  return $rc
+}
+
+# Pregunta al origen cuál es la última versión y la guarda en la config.
+# Síncrono pero con tope: 0 si obtuvo respuesta.
+hf_update_refresh() {
+  if [ "$(hf_update_channel)" = "git" ]; then
+    local sha
+    sha="$(GIT_TERMINAL_PROMPT=0 _hf_timeout 8 git -C "$HIVEFLOW_ROOT" ls-remote --quiet origin HEAD 2>/dev/null | awk '{print $1}')"
+    [ -n "$sha" ] || return 1
+    hf_config_set '.update.remote_sha' "$sha"
+  else
+    local latest
+    latest="$(curl -s -m 8 "$HF_NPM_REGISTRY" 2>/dev/null | jq -r '.version // empty' 2>/dev/null)"
+    [ -n "$latest" ] || return 1
+    hf_config_set '.update.latest_version' "$latest"
+  fi
+}
+
+# Un clon de git solo se actualiza solo si es una instalación "de usuario":
+# parado en la rama por defecto del origen y sin cambios locales. Un checkout
+# de desarrollo (otra rama, archivos tocados) no se toca nunca.
+_hf_update_git_safe() {
+  local def cur
+  def="$(git -C "$HIVEFLOW_ROOT" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)"
+  def="${def#origin/}"
+  cur="$(git -C "$HIVEFLOW_ROOT" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+  [ -n "$def" ] && [ "$cur" = "$def" ] || return 1
+  [ -z "$(git -C "$HIVEFLOW_ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ]
+}
+
+# Baja la versión nueva sin preguntar ni pintar el detalle. 0 si quedó instalada.
+_hf_update_apply_quiet() {
+  case "$(hf_update_channel)" in
+    git)     GIT_TERMINAL_PROMPT=0 _hf_timeout 120 git -C "$HIVEFLOW_ROOT" pull --ff-only --quiet >/dev/null 2>&1 ;;
+    npm)     _hf_timeout 180 npm install -g @hiveflow/cli@latest >/dev/null 2>&1 ;;
+    tarball) _hf_timeout 180 bash -c 'curl -fsSL https://hiveflow.ai/install.sh | bash' >/dev/null 2>&1 ;;
+  esac
+}
+
+# ¿Está encendida la actualización automática?
+hf_auto_update_enabled() {
+  [ "${HIVEFLOW_NO_AUTO_UPDATE:-0}" = "1" ] && return 1
+  [ "$(hf_config_get '.update.auto')" = "false" ] && return 1
+  if [ "$(hf_update_channel)" = "git" ]; then _hf_update_git_safe || return 1; fi
+  return 0
+}
+
+# Al abrir: si hay versión nueva, bajarla y relanzar el CLI con los mismos
+# argumentos. $1 = "force" salta el tope de una comprobación por hora (lo usa
+# `remote control`, que es como arrancan los servicios). Si algo falla —sin
+# red, pull rechazado— se sigue con la versión que hay, sin bloquear.
+hf_auto_update() {
+  local force="${1:-}"
+  shift
+  [ -n "${HF_AUTO_UPDATED:-}" ] && return 0          # ya nos relanzamos una vez
+  [ -n "${HF_ENTRY:-}" ] || return 0
+  hf_auto_update_enabled || return 0
+  local now last
+  now="$(date +%s)"
+  last="$(hf_config_get '.update.auto_checked_at')"
+  if [ "$force" != "force" ] && [ -n "$last" ] && [ $((now - last)) -lt "$HF_AUTO_UPDATE_INTERVAL" ]; then
+    return 0
+  fi
+  hf_config_set '.update.auto_checked_at' "$now"
+  hf_update_refresh || return 0
+  local latest
+  latest="$(hf_update_available)" || return 0
+  hf_info "$(hf_t "New version available ($latest): updating…" "Hay una versión nueva ($latest): actualizando…")"
+  if ! _hf_update_apply_quiet; then
+    hf_warn "$(hf_t "Could not update automatically; continuing with the current version. Try /update" "No se pudo actualizar solo; sigo con la versión actual. Prueba /update")"
+    return 0
+  fi
+  hf_ok "$(hf_t "Updated." "Actualizado.")"
+  export HF_AUTO_UPDATED=1
+  exec "$HF_ENTRY" "$@"
+}
+
 hf_update_channel() {
-  if [ -d "$HIVEFLOW_ROOT/.git" ]; then
+  # -e y no -d: en un worktree de git, .git es un archivo.
+  if [ -e "$HIVEFLOW_ROOT/.git" ]; then
     echo "git"
   elif case "$HIVEFLOW_ROOT" in "$HOME/.hiveflow/cli"*) true ;; *) false ;; esac; then
     # Instalado con `curl hiveflow.ai/install.sh | bash` (sin git ni npm)
@@ -87,15 +180,7 @@ hf_update_cmd() {
   channel="$(hf_update_channel)"
   if [ "${1:-}" = "check" ]; then
     hf_info "$(hf_t "Checking..." "Comprobando...")"
-    if [ "$channel" = "git" ]; then
-      local sha
-      sha="$(git -C "$HIVEFLOW_ROOT" ls-remote --quiet origin HEAD 2>/dev/null | awk '{print $1}')"
-      [ -n "$sha" ] && hf_config_set '.update.remote_sha' "$sha"
-    else
-      local latest
-      latest="$(curl -s -m 8 "$HF_NPM_REGISTRY" 2>/dev/null | jq -r '.version // empty' 2>/dev/null)"
-      [ -n "$latest" ] && hf_config_set '.update.latest_version' "$latest"
-    fi
+    hf_update_refresh
     if hf_update_available >/dev/null; then
       hf_update_notice
     else
