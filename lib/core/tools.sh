@@ -16,6 +16,22 @@ type hf_t >/dev/null 2>&1 || hf_t() { if [ "${HF_LANG:-en}" = "es" ] && [ -n "${
 
 HF_TOOLS=(claude gemini codex aider)
 
+# hf_str_replace_into <var> <texto> <patrón> <reemplazo>
+# Reemplazo LITERAL de todas las apariciones, sin ${x//pat/rep}: desde bash 5.2
+# (patsub_replacement, activo por defecto) cada & del reemplazo se cambia por
+# el patrón, y una URL firmada (?a=1&b=2) llegaba rota al motor. Igual en
+# bash 3.2 y 5.x. Escribe en <var> con printf -v (conserva saltos finales).
+hf_str_replace_into() {
+  local _hf_rv="$1" _hf_s="$2" _hf_pat="$3" _hf_rep="$4" _hf_out=""
+  if [ -n "$_hf_pat" ]; then
+    while [[ "$_hf_s" == *"$_hf_pat"* ]]; do
+      _hf_out="$_hf_out${_hf_s%%"$_hf_pat"*}$_hf_rep"
+      _hf_s="${_hf_s#*"$_hf_pat"}"
+    done
+  fi
+  printf -v "$_hf_rv" '%s' "$_hf_out$_hf_s"
+}
+
 hf_tool_bin() {
   case "$1" in
     claude) echo "claude" ;;
@@ -149,7 +165,7 @@ hf_tool_cmd() {
   escaped=$(printf '%s' "$prompt" | sed "s/'/'\\\\''/g")
 
   local cmd="$template"
-  cmd="${cmd//\{PROMPT\}/$escaped}"
-  cmd="${cmd//\{OPTIONS\}/$flags}"
+  hf_str_replace_into cmd "$cmd" '{PROMPT}' "$escaped"
+  hf_str_replace_into cmd "$cmd" '{OPTIONS}' "$flags"
   echo "$cmd"
 }

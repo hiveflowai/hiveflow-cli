@@ -209,8 +209,14 @@ skills_render() {
     body=$(skills_body "$name") || return 1
     local pat='{{args}}'
     if [[ "$body" == *"$pat"* ]]; then
-        # Bash parameter expansion: literal global replace; $args is literal value.
-        printf '%s\n' "${body//$pat/$args}"
+        # Literal global replace without ${body//pat/rep}: since bash 5.2
+        # (patsub_replacement) every & in $args would become the pattern.
+        local out="" rest="$body"
+        while [[ "$rest" == *"$pat"* ]]; do
+            out="$out${rest%%"$pat"*}$args"
+            rest="${rest#*"$pat"}"
+        done
+        printf '%s\n' "$out$rest"
     else
         printf '%s\n' "$body"
         if [ -n "$args" ]; then
