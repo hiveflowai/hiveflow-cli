@@ -558,6 +558,9 @@ _hf_relay_progress() {
     http:*)
       url="$(hf_remote_relay)"; url="${url#http:}"
       chunk="$(printf '%s' "$chunk" | sed -e $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' -e $'s/\r//g')"
+      # El marcador HF_SEND: es plomería del puente: tampoco va en el avance en vivo
+      # (la respuesta final ya lo quitaba, pero el chat lo veía mientras corría).
+      chunk="$(printf '%s\n' "$chunk" | grep -v '^[[:space:]]*HF_SEND:')"
       [ -z "$chunk" ] && return 0
       curl -s -m 8 -X POST "${url}/progress" \
         -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
@@ -624,19 +627,36 @@ _hf_rc_upload_one() {
   printf '%s' "$resp" | jq -c 'select(.ok == true) | .file' 2>/dev/null
 }
 
+# Segundos desde epoch de la última modificación (BSD/macOS y GNU).
+_hf_rc_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
 # Junta los archivos de un turno y los sube. Fuentes, en orden:
 #   1. marcador explícito  HF_SEND: /ruta/absoluta   (lo imprime el CLI)
-#   2. rutas o nombres de archivo de medios que aparecen en la salida
+#   2. sin marcadores: rutas o nombres de archivo de medios que aparecen en la
+#      salida, PERO solo si el archivo se creó o cambió durante el turno
+#      ($2 = epoch de inicio). Lo que solo se mencionó (las .md de las skills,
+#      un /skills, un archivo que el CLI leyó) no se sube: nadie lo pidió.
+#      Sin $2 solo valen los marcadores.
 # Devuelve un array JSON (vacío si no hay nada que mandar).
 _hf_rc_collect_files() {
-  local out="$1" cand resolved n=0 json="[]" item max="$HF_RC_MAX_FILES"
-  local seen=" "
-  printf '%s\n' "$out" | grep -q '^[[:space:]]*HF_SEND:' && max="$HF_RC_MAX_FILES_MARKED"
+  local out="$1" since="${2:-}" cand resolved n=0 json="[]" item max="$HF_RC_MAX_FILES"
+  local seen=" " marked_mode=0 mt
+  printf '%s\n' "$out" | grep -q '^[[:space:]]*HF_SEND:' && marked_mode=1
+  # Sin marcadores ni inicio de turno no hay forma de saber qué se generó.
+  [ "$marked_mode" = 0 ] && [ -z "$since" ] && { printf '[]'; return 0; }
+  [ "$marked_mode" = 1 ] && max="$HF_RC_MAX_FILES_MARKED"
   while IFS= read -r cand; do
     [ -z "$cand" ] && continue
     [ "$n" -ge "$max" ] && break
     resolved="$(_hf_rc_resolve_path "$cand")" || continue
     case "$seen" in *" $resolved "*) continue ;; esac
+    if [ "$marked_mode" = 0 ]; then
+      # 1 s de margen: la marca de tiempo es de segundos
+      mt="$(_hf_rc_mtime "$resolved")"
+      if [ -z "$mt" ] || [ "$mt" -lt $((since - 1)) ]; then continue; fi
+    fi
     seen="$seen$resolved "
     item="$(_hf_rc_upload_one "$resolved")" || continue
     [ -z "$item" ] && continue
@@ -832,8 +852,9 @@ _hf_rc_daemon() {
       fi
       # MISMA ejecución que el REPL, pero con salida PROGRESIVA: cada línea
       # nueva se manda a la web (/progress) y se pinta en la terminal en vivo.
-      local outf runpid sent total new out
+      local outf runpid sent total new out turn_start
       outf=$(mktemp)
+      turn_start=$(date +%s)
       if [[ "$text" == /* ]]; then
         ( hf_handle_slash "$text" ) > "$outf" 2>&1 &
       else
@@ -876,7 +897,7 @@ _hf_rc_daemon() {
       # Adjuntos del turno: se suben y viajan con la respuesta; el marcador
       # HF_SEND: es plomería, no se le muestra a quien lee en la web.
       local rc_files
-      rc_files="$(_hf_rc_collect_files "$out")"
+      rc_files="$(_hf_rc_collect_files "$out" "$turn_start")"
       if [ "$rc_files" != "[]" ]; then
         out="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*HF_SEND:' || printf '%s' "$out")"
         { printf '  \033[38;5;51m📎\033[0m %s\n' "$(hf_t "sent $(printf '%s' "$rc_files" | jq -r 'length') file(s) to the web" "enviado(s) $(printf '%s' "$rc_files" | jq -r 'length') archivo(s) a la web")"; } > /dev/tty 2>/dev/null || true
