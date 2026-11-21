@@ -172,7 +172,7 @@ assert_eq "hf_agent_env hiveflow -> 0" "0" "$rc"
 assert_eq "llm_choice mapea a claude" "claude" "${llm_choice:-}"
 assert_eq "ANTHROPIC_API_KEY = token de cuenta" "hf_test123.abc" "${ANTHROPIC_API_KEY:-}"
 assert_eq "URL apunta al proxy" "https://api.test.local/api/cli/llm/v1/messages" "${ANTHROPIC_MESSAGES_URL:-}"
-assert_eq "modelo default sonnet-5" "claude-sonnet-5" "${CODER_CLAUDE_MODEL:-}"
+assert_eq "modelo default sonnet-4-6 (existe en el Bedrock del proxy)" "claude-sonnet-4-6" "${CODER_CLAUDE_MODEL:-}"
 
 if hf_agent_available; then pass "hf_agent_available con hiveflow + sesión"; else fail "hf_agent_available con hiveflow + sesión"; fi
 hf_auth_token() { echo ""; }
@@ -184,6 +184,45 @@ export HIVEFLOW_LLM_KEY="hf_ci_key"
 hf_agent_env
 assert_eq "HIVEFLOW_LLM_KEY gana sin sesión" "hf_ci_key" "${ANTHROPIC_API_KEY:-}"
 unset HIVEFLOW_LLM_KEY ANTHROPIC_MESSAGES_URL ANTHROPIC_API_KEY CODER_CLAUDE_MODEL llm_choice
+
+# Default del modelo: un solo lugar (hf_default_model) y configs viejas
+echo "=== default de modelo: hf_default_model / hf_hiveflow_model ==="
+assert_eq "hf_default_model hiveflow" "claude-sonnet-4-6" "$(hf_default_model hiveflow)"
+assert_eq "hf_default_model claude" "claude-sonnet-4-6" "$(hf_default_model claude)"
+assert_eq "hf_default_model chatgpt" "gpt-4o" "$(hf_default_model chatgpt)"
+assert_eq "HIVEFLOW_DEFAULT_CLAUDE_MODEL override" "claude-opus-4-5-20251101" "$(HIVEFLOW_DEFAULT_CLAUDE_MODEL=claude-opus-4-5-20251101 hf_default_model hiveflow)"
+assert_eq "hf_hiveflow_model vacío -> default" "claude-sonnet-4-6" "$(hf_hiveflow_model "")"
+assert_eq "hf_hiveflow_model viejo default sonnet-5 -> default" "claude-sonnet-4-6" "$(hf_hiveflow_model claude-sonnet-5)"
+assert_eq "hf_hiveflow_model respeta elección" "claude-haiku-4-5-20251001" "$(hf_hiveflow_model claude-haiku-4-5-20251001)"
+
+# Config guardada con el viejo default (claude-sonnet-5) -> se corrige
+hf_config_get() {
+    case "$1" in
+        '.llm.provider') echo "hiveflow" ;;
+        '.llm.model')    echo "claude-sonnet-5" ;;
+        *) echo "" ;;
+    esac
+}
+hf_auth_token() { echo "hf_test123.abc"; }
+hf_agent_env
+assert_eq "config vieja sonnet-5 + hiveflow -> sonnet-4-6" "claude-sonnet-4-6" "${CODER_CLAUDE_MODEL:-}"
+unset CODER_CLAUDE_MODEL
+# HIVEFLOW_LLM_MODEL explícito gana siempre (aunque sea sonnet-5)
+export HIVEFLOW_LLM_MODEL="claude-sonnet-5"
+hf_agent_env
+assert_eq "HIVEFLOW_LLM_MODEL explícito gana" "claude-sonnet-5" "${CODER_CLAUDE_MODEL:-}"
+unset HIVEFLOW_LLM_MODEL ANTHROPIC_MESSAGES_URL ANTHROPIC_API_KEY CODER_CLAUDE_MODEL llm_choice
+# Config con modelo propio se respeta
+hf_config_get() {
+    case "$1" in
+        '.llm.provider') echo "hiveflow" ;;
+        '.llm.model')    echo "claude-opus-4-5-20251101" ;;
+        *) echo "" ;;
+    esac
+}
+hf_agent_env
+assert_eq "config con modelo propio se respeta" "claude-opus-4-5-20251101" "${CODER_CLAUDE_MODEL:-}"
+unset ANTHROPIC_MESSAGES_URL ANTHROPIC_API_KEY CODER_CLAUDE_MODEL llm_choice
 
 # =====================================================
 echo "=== provider ollama: modelos locales sin API key ==="

@@ -156,6 +156,55 @@ _assert_contains "empieza por la tarea" "haz X" "${P:0:5}"
 _assert_contains "trae las skills" "## Skills" "$P"
 _assert_contains "trae la nota" "chat web" "$P"
 
+echo "== HF_SEND: nunca viaja al backend (ni la ruta local)"
+BODY_LOG="$TMP_DIR/body.log"; : > "$BODY_LOG"; : > "$CURL_LOG"
+curl() {
+  local url="" a prev=""
+  for a in "$@"; do
+    case "$a" in http*) url="$a" ;; esac
+    [ "$prev" = "-d" ] && printf '%s\t%s\n' "$url" "$a" >> "$BODY_LOG"
+    prev="$a"
+  done
+  echo "$url" >> "$CURL_LOG"
+  echo '{}'
+}
+RAW="$(printf 'Listo, aquí está.\nHF_SEND: /Users/alguien/Desktop/reporte.pdf\n  HF_SEND: /tmp/x.png')"
+_hf_relay_respond "sess-test" "m1" "$RAW" "[]"
+_assert_not_contains "respond sin adjuntos: sin HF_SEND" "HF_SEND" "$(cat "$BODY_LOG")"
+_assert_not_contains "respond sin adjuntos: sin ruta local" "/Users/alguien" "$(cat "$BODY_LOG")"
+_assert_contains "respond conserva el texto" "Listo, aquí está." "$(cat "$BODY_LOG")"
+: > "$BODY_LOG"
+_hf_relay_progress "m1" "$RAW"
+_assert_not_contains "progress: sin HF_SEND" "HF_SEND" "$(cat "$BODY_LOG")"
+: > "$BODY_LOG"
+_hf_rc_append assistant "$RAW"
+_assert_not_contains "append (turno local): sin HF_SEND" "HF_SEND" "$(cat "$BODY_LOG")"
+_assert_contains "append (turno local) sí se manda" "/append" "$(cat "$BODY_LOG")"
+: > "$BODY_LOG"
+_hf_rc_append assistant "HF_SEND: /tmp/solo.png"
+_assert "append que solo traía HF_SEND no se manda" "$(grep -c '/append' "$BODY_LOG")" "0"
+
+echo "== turno de la web: el CLI no manda /append de texto (solo /respond)"
+: > "$BODY_LOG"
+( HF_RUN_FROM_RC=1 _hf_rc_append assistant "respuesta" )
+_assert "HF_RUN_FROM_RC: sin /append de texto" "$(grep -c '/append' "$BODY_LOG")" "0"
+( HF_RUN_FROM_RC=1 _hf_rc_append assistant "foto.png" '[{"url":"https://x/f.png","name":"foto.png"}]' )
+_assert "HF_RUN_FROM_RC: /send con adjunto sí pasa" "$(grep -c '/append' "$BODY_LOG")" "1"
+
+echo "== el daemon marca también los slash de la web (HF_RUN_FROM_RC)"
+_assert_contains "slash del daemon corre con HF_RUN_FROM_RC=1" 'HF_RUN_FROM_RC=1 hf_handle_slash "$text"' "$(declare -f _hf_rc_daemon)"
+
+echo "== agente nativo pedido desde la web: no hay /append"
+: > "$BODY_LOG"
+hf_agent_turn() { :; }
+hf_session_last_assistant() { echo "respuesta nativa"; }
+( HF_RUN_FROM_RC=1 _hf_native_turn "hola" ) >/dev/null 2>&1
+sleep 1
+_assert "nativo desde la web: sin /append" "$(grep -c '/append' "$BODY_LOG")" "0"
+( _hf_native_turn "hola" ) >/dev/null 2>&1
+sleep 1
+_assert "nativo tecleado en la terminal: un /append" "$(grep -c '/append' "$BODY_LOG")" "1"
+
 echo ""
 echo "Resultado: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

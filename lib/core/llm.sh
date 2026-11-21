@@ -41,9 +41,10 @@ hf_llm_setup() {
       hf_err "$(hf_t "You need to connect your account first: /login" "Necesitas conectar tu cuenta primero: /login")"
       return 1
     fi
-    local model
-    read -r -p "  $(hf_t "Model [claude-sonnet-5]: " "Modelo [claude-sonnet-5]: ")" model
-    model="${model:-claude-sonnet-5}"
+    local model default_model
+    default_model="$(hf_default_model hiveflow)"
+    read -r -p "  $(hf_t "Model [$default_model]: " "Modelo [$default_model]: ")" model
+    model="${model:-$default_model}"
     hf_config_set '.llm.provider' "hiveflow"
     hf_config_del '.llm.key'
     hf_config_set '.llm.model' "$model"
@@ -75,11 +76,7 @@ hf_llm_setup() {
 
   # Modelo: default sensato por proveedor, editable
   local default_model
-  case "$provider" in
-    claude)  default_model="claude-sonnet-5" ;;
-    chatgpt) default_model="gpt-4o" ;;
-    gemini)  default_model="gemini-2.5-pro" ;;
-  esac
+  default_model="$(hf_default_model "$provider")"
   local model
   read -r -p "  $(hf_t "Model [$default_model]: " "Modelo [$default_model]: ")" model
   model="${model:-$default_model}"
@@ -115,7 +112,7 @@ hf_ask() {
       curl -s -m 120 "$HIVEFLOW_API_URL/api/cli/llm/v1/messages" \
         -H "x-api-key: $key" \
         -H "content-type: application/json" \
-        -d "{\"model\":\"${model:-claude-sonnet-5}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
+        -d "{\"model\":\"$(hf_hiveflow_model "$model")\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
         | jq -r --arg u "$unexpected" '.content[0].text // ("ERROR: " + (.error.message // $u))'
       ;;
     claude)
@@ -123,7 +120,7 @@ hf_ask() {
         -H "x-api-key: $key" \
         -H "anthropic-version: 2023-06-01" \
         -H "content-type: application/json" \
-        -d "{\"model\":\"${model:-claude-sonnet-5}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
+        -d "{\"model\":\"${model:-$(hf_default_model claude)}\",\"max_tokens\":4096,\"messages\":[{\"role\":\"user\",\"content\":$escaped}]}" \
         | jq -r --arg u "$unexpected" '.content[0].text // ("ERROR: " + (.error.message // $u))'
       ;;
     chatgpt)
