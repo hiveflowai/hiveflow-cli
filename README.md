@@ -185,7 +185,7 @@ hiveflow -p "write tests for src/auth.js"
 
 # Native agent one-shot: stdout = model response, real exit code.
 # Embeddable in scripts, CI or other apps with no prior config:
-export HIVEFLOW_LLM_PROVIDER=claude HIVEFLOW_LLM_KEY=sk-... HIVEFLOW_LLM_MODEL=claude-sonnet-5
+export HIVEFLOW_LLM_PROVIDER=claude HIVEFLOW_LLM_KEY=sk-... HIVEFLOW_LLM_MODEL=claude-sonnet-4-6
 hiveflow agent --yes "fix the TODO in src/auth.js and run the tests"
 
 # Multi-turn with a resumable session
