@@ -152,7 +152,11 @@ hf_agent_env() {
     export ANTHROPIC_API_KEY="$key"
     export ANTHROPIC_MESSAGES_URL="${HIVEFLOW_API_URL%/}/api/cli/llm/v1/messages"
     HF_AGENT_ENV_EXPORTED="ANTHROPIC_API_KEY ANTHROPIC_MESSAGES_URL HIVEFLOW_API_TOKEN"
-    export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-claude-sonnet-5}}"
+    if [ -n "${HIVEFLOW_LLM_MODEL:-}" ]; then
+      export CODER_CLAUDE_MODEL="$HIVEFLOW_LLM_MODEL"
+    else
+      export CODER_CLAUDE_MODEL="$(hf_hiveflow_model "${model:-${CODER_CLAUDE_MODEL:-}}")"
+    fi
     hf_agent_project_context
     return 0
   fi
@@ -185,17 +189,17 @@ hf_agent_env() {
     claude)
       export ANTHROPIC_API_KEY="$key"
       HF_AGENT_ENV_EXPORTED="ANTHROPIC_API_KEY HIVEFLOW_API_TOKEN"
-      export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-claude-sonnet-5}}"
+      export CODER_CLAUDE_MODEL="${model:-${CODER_CLAUDE_MODEL:-$(hf_default_model claude)}}"
       ;;
     chatgpt)
       export OPENAI_API_KEY="$key"
       HF_AGENT_ENV_EXPORTED="OPENAI_API_KEY HIVEFLOW_API_TOKEN"
-      export CODER_OPENAI_MODEL="${model:-${CODER_OPENAI_MODEL:-gpt-4o}}"
+      export CODER_OPENAI_MODEL="${model:-${CODER_OPENAI_MODEL:-$(hf_default_model chatgpt)}}"
       ;;
     gemini)
       export GEMINI_API_KEY="$key"
       HF_AGENT_ENV_EXPORTED="GEMINI_API_KEY"
-      export CODER_GEMINI_MODEL="${model:-${CODER_GEMINI_MODEL:-gemini-2.5-pro}}"
+      export CODER_GEMINI_MODEL="${model:-${CODER_GEMINI_MODEL:-$(hf_default_model gemini)}}"
       ;;
     *)
       hf_err "$(hf_t "Provider not supported by the agent: $provider (hiveflow|claude|chatgpt|gemini|ollama)" "Proveedor no soportado por el agente: $provider (hiveflow|claude|chatgpt|gemini|ollama)")"

@@ -609,12 +609,10 @@ hf_status_line() {
   branch="$(git branch --show-current 2>/dev/null)"
   provider="$(hf_config_get '.llm.provider')"
   model="$(hf_config_get '.llm.model')"
-  if [ -n "$provider" ] && [ -z "$model" ]; then
-    case "$provider" in
-      claude|hiveflow) model="claude-sonnet-5" ;;
-      chatgpt)         model="gpt-4o" ;;
-      gemini)          model="gemini-2.5-pro" ;;
-    esac
+  if [ "$provider" = "hiveflow" ]; then
+    model="$(hf_hiveflow_model "$model")"
+  elif [ -n "$provider" ] && [ -z "$model" ]; then
+    model="$(hf_default_model "$provider")"
   fi
   line="  [$(hf_env_tag)] $path"
   [ -n "$branch" ] && line="$line ⎇ $branch"

@@ -429,8 +429,16 @@ _hf_relay_poll() {
   esac
 }
 
+# El marcador HF_SEND: /ruta es plomería del puente (dice qué archivo subir):
+# nunca viaja al backend en ningún texto, ni con la ruta local adentro.
+_hf_rc_strip_send() {
+  printf '%s\n' "$1" | grep -v '^[[:space:]]*HF_SEND:'
+  return 0
+}
+
 _hf_relay_respond() {
   local sid="$1" mid="$2" output="$3" files="${4:-[]}"
+  output="$(_hf_rc_strip_send "$output")"
   printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
   case "$(hf_remote_relay)" in
     local:*)
@@ -558,6 +566,9 @@ _hf_relay_progress() {
     http:*)
       url="$(hf_remote_relay)"; url="${url#http:}"
       chunk="$(printf '%s' "$chunk" | sed -e $'s/\x1b\\[[0-9;?]*[a-zA-Z]//g' -e $'s/\r//g')"
+      # El marcador HF_SEND: es plomería del puente: tampoco va en el avance en vivo
+      # (la respuesta final ya lo quitaba, pero el chat lo veía mientras corría).
+      chunk="$(_hf_rc_strip_send "$chunk")"
       [ -z "$chunk" ] && return 0
       curl -s -m 8 -X POST "${url}/progress" \
         -H "Authorization: Bearer $(hf_auth_token)" -H "Content-Type: application/json" \
@@ -624,19 +635,36 @@ _hf_rc_upload_one() {
   printf '%s' "$resp" | jq -c 'select(.ok == true) | .file' 2>/dev/null
 }
 
+# Segundos desde epoch de la última modificación (BSD/macOS y GNU).
+_hf_rc_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
 # Junta los archivos de un turno y los sube. Fuentes, en orden:
 #   1. marcador explícito  HF_SEND: /ruta/absoluta   (lo imprime el CLI)
-#   2. rutas o nombres de archivo de medios que aparecen en la salida
+#   2. sin marcadores: rutas o nombres de archivo de medios que aparecen en la
+#      salida, PERO solo si el archivo se creó o cambió durante el turno
+#      ($2 = epoch de inicio). Lo que solo se mencionó (las .md de las skills,
+#      un /skills, un archivo que el CLI leyó) no se sube: nadie lo pidió.
+#      Sin $2 solo valen los marcadores.
 # Devuelve un array JSON (vacío si no hay nada que mandar).
 _hf_rc_collect_files() {
-  local out="$1" cand resolved n=0 json="[]" item max="$HF_RC_MAX_FILES"
-  local seen=" "
-  printf '%s\n' "$out" | grep -q '^[[:space:]]*HF_SEND:' && max="$HF_RC_MAX_FILES_MARKED"
+  local out="$1" since="${2:-}" cand resolved n=0 json="[]" item max="$HF_RC_MAX_FILES"
+  local seen=" " marked_mode=0 mt
+  printf '%s\n' "$out" | grep -q '^[[:space:]]*HF_SEND:' && marked_mode=1
+  # Sin marcadores ni inicio de turno no hay forma de saber qué se generó.
+  [ "$marked_mode" = 0 ] && [ -z "$since" ] && { printf '[]'; return 0; }
+  [ "$marked_mode" = 1 ] && max="$HF_RC_MAX_FILES_MARKED"
   while IFS= read -r cand; do
     [ -z "$cand" ] && continue
     [ "$n" -ge "$max" ] && break
     resolved="$(_hf_rc_resolve_path "$cand")" || continue
     case "$seen" in *" $resolved "*) continue ;; esac
+    if [ "$marked_mode" = 0 ]; then
+      # 1 s de margen: la marca de tiempo es de segundos
+      mt="$(_hf_rc_mtime "$resolved")"
+      if [ -z "$mt" ] || [ "$mt" -lt $((since - 1)) ]; then continue; fi
+    fi
     seen="$seen$resolved "
     item="$(_hf_rc_upload_one "$resolved")" || continue
     [ -z "$item" ] && continue
@@ -711,9 +739,17 @@ hf_rc_send() {
 _hf_rc_append() {
   local role="$1" content="$2" files="${3:-[]}" sid url resp
   hf_rc_mirror_active || return 0
+  printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
+  # Turno que pidió la web (lo corre el daemon): la respuesta ya la guarda
+  # /respond; un append de texto aquí la duplicaría en el chat. Solo pasan
+  # los adjuntos explícitos (/send desde la web).
+  if [ -n "${HF_RUN_FROM_RC:-}" ] && [ "$files" = "[]" ]; then
+    return 0
+  fi
+  content="$(_hf_rc_strip_send "$content")"
+  [ -z "$content" ] && [ "$files" = "[]" ] && return 0
   sid="$(cat "$(_hf_rc_state_dir)/session" 2>/dev/null)"
   [ -z "$sid" ] && return 0
-  printf '%s' "$files" | jq -e . >/dev/null 2>&1 || files="[]"
   case "$(hf_remote_relay)" in
     http:*)
       url="$(hf_remote_relay)"; url="${url#http:}"
@@ -748,6 +784,7 @@ _hf_rc_backfill() {
     .[] | select(.role=="user" or .role=="assistant")
     | .content = (if (.content|type)=="string" then .content
         else ([.content[]? | select(.type=="text") | .text] | join("\n")) end)
+    | .content = ((.content // "") | split("\n") | map(select(test("^\\s*HF_SEND:") | not)) | join("\n"))
     | select(.content != null and .content != "")
     | {role, content}' 2>/dev/null | while IFS= read -r m; do
       curl -s -m 10 -X POST "${url}/append" \
@@ -832,10 +869,14 @@ _hf_rc_daemon() {
       fi
       # MISMA ejecución que el REPL, pero con salida PROGRESIVA: cada línea
       # nueva se manda a la web (/progress) y se pinta en la terminal en vivo.
-      local outf runpid sent total new out
+      local outf runpid sent total new out turn_start
       outf=$(mktemp)
+      turn_start=$(date +%s)
       if [[ "$text" == /* ]]; then
-        ( hf_handle_slash "$text" ) > "$outf" 2>&1 &
+        # HF_RUN_FROM_RC=1 también aquí: la respuesta la manda /respond; sin
+        # la marca, un slash que corre el agente (p. ej. /agent) la añadía
+        # además por /append y la web la veía dos veces.
+        ( HIVEFLOW_NO_SPINNER=1 HF_RUN_FROM_RC=1 hf_handle_slash "$text" ) > "$outf" 2>&1 &
       else
         # El prompt lleva la instrucción del marcador: quien pregunta está en
         # la web y necesita el ARCHIVO, no su descripción.
@@ -876,9 +917,11 @@ _hf_rc_daemon() {
       # Adjuntos del turno: se suben y viajan con la respuesta; el marcador
       # HF_SEND: es plomería, no se le muestra a quien lee en la web.
       local rc_files
-      rc_files="$(_hf_rc_collect_files "$out")"
+      rc_files="$(_hf_rc_collect_files "$out" "$turn_start")"
+      # Sin archivo subido (ruta inexistente, fallo de subida) también se quita:
+      # antes la línea viajaba con la ruta absoluta de esta computadora.
+      out="$(_hf_rc_strip_send "$out")"
       if [ "$rc_files" != "[]" ]; then
-        out="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*HF_SEND:' || printf '%s' "$out")"
         { printf '  \033[38;5;51m📎\033[0m %s\n' "$(hf_t "sent $(printf '%s' "$rc_files" | jq -r 'length') file(s) to the web" "enviado(s) $(printf '%s' "$rc_files" | jq -r 'length') archivo(s) a la web")"; } > /dev/tty 2>/dev/null || true
       fi
       _hf_relay_respond "$sid" "$mid" "$out" "$rc_files"

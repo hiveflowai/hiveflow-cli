@@ -209,7 +209,7 @@ neither a hiveflow account nor prior config — everything can come via env:
 ```bash
 export HIVEFLOW_LLM_PROVIDER=claude          # hiveflow | claude | chatgpt | gemini
 export HIVEFLOW_LLM_KEY=sk-ant-...           # with provider=hiveflow: an hf_ API key from your profile
-export HIVEFLOW_LLM_MODEL=claude-sonnet-5    # optional
+export HIVEFLOW_LLM_MODEL=claude-sonnet-4-6    # optional
 
 hiveflow agent --yes "fix the TODO in src/auth.js and run the tests"
 echo $?                                      # 0 if it finished fine
@@ -444,7 +444,7 @@ Useful env vars: `HIVEFLOW_CONFIG_DIR`, `HIVEFLOW_ENGINE_DIR`,
 `HIVEFLOW_LLM_PROVIDER/KEY/MODEL`, `HIVEFLOW_NO_PROJECT_CONTEXT=1` (don't
 inject AGENTS.md/structure), `TOOL_LOOP_MAX_ITERATIONS` (loop iterations,
 default 40), `CODER_CLAUDE_MODEL` / `CODER_OPENAI_MODEL` / `CODER_GEMINI_MODEL`
-(models per provider; unset: `claude-sonnet-5` / `gpt-4o` /
+(models per provider; unset: `claude-sonnet-4-6` / `gpt-4o` /
 `gemini-2.5-pro`).
 
 **Updates.** When you open hiveflow (the REPL or `hiveflow remote control`)
