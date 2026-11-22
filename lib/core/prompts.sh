@@ -39,7 +39,8 @@ hf_prompt() {
   local a name val
   for a in "$@"; do
     name="${a%%=*}"; val="${a#*=}"
-    tpl="${tpl//\{\{$name\}\}/$val}"
+    # literal, sin ${x//pat/rep}: con bash ≥ 5.2 cada & del valor se volvía el patrón
+    hf_str_replace_into tpl "$tpl" "{{$name}}" "$val"
   done
   printf '%s' "$tpl"
 }
